@@ -90,9 +90,18 @@ def load_users():
     """Загрузка данных пользователей из файла"""
     try:
         with open(USERS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            data = json.load(f)
+            # Убедимся, что все необходимые ключи существуют
+            if 'pending' not in data:
+                data['pending'] = []
+            if 'approved' not in data:
+                data['approved'] = []
+            if 'events' not in data:
+                data['events'] = []
+            return data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {'pending': [], 'approved': []}
+        # Если файла нет, вернем структуру по умолчанию
+        return {'pending': [], 'approved': [], 'events': []}
 
 def save_users(users_data):
     """Сохранение данных пользователей в файл"""
@@ -271,3 +280,4 @@ def hello_world():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
