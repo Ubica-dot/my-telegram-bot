@@ -168,7 +168,8 @@ def telegram_webhook():
                     """
                     send_message(chat_id, welcome_text)
 
-                elif text == '/events':
+        # === ДОБАВЛЯЕМЫЙ БЛОК ДЛЯ /events ===
+        elif text == '/events':
             users_data = load_users()
             
             # Проверяем, одобрен ли пользователь
@@ -191,7 +192,8 @@ def telegram_webhook():
                     message += f"👥 Участников: {event['participants']}\n\n"
                 
                 send_message(chat_id, message)
-        
+        # === КОНЕЦ ДОБАВЛЯЕМОГО БЛОКА ===
+
         elif text.startswith('/'):
             # Игнорируем другие команды для непринятых пользователей
             if not is_approved:
@@ -473,5 +475,6 @@ def view_events():
     
     html += '<br><a href="/admin/events"><button>← Назад</button></a>'
     return html
+
 
 
