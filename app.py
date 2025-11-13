@@ -1,5 +1,4 @@
 import uuid
-from datetime import datetime
 import os
 import json
 import requests
@@ -56,6 +55,9 @@ ADMIN_PANEL_HTML = """
         <strong>Дата одобрения:</strong> {{ user.approved_timestamp }}<br>
     </div>
     {% endfor %}
+
+    <h2>Управление мероприятиями</h2>
+    <a href="/admin/events"><button style="padding: 10px; margin: 5px;">🎇 Управление мероприятиями</button></a>
 
     <script>
     function approveUser(chatId) {
@@ -132,6 +134,19 @@ def notify_admin(message):
     """Уведомление администратора о новой заявке"""
     send_message(ADMIN_ID, message)
 
+def notify_users_about_new_event(event):
+    """Уведомление всех одобренных пользователей о новом мероприятии"""
+    users_data = load_users()
+    
+    for user in users_data['approved']:
+        message = f"🎉 Новое мероприятие!\n\n"
+        message += f"📌 {event['name']}\n"
+        message += f"📝 {event['description'][:100]}...\n"
+        message += f"⏰ До: {event['end_date']}\n\n"
+        message += f"Используйте /events для просмотра и участия!"
+        
+        send_message(user['chat_id'], message)
+
 @app.route(f'/{TOKEN}', methods=['POST'])
 def telegram_webhook():
     """Обработка входящих сообщений от Telegram"""
@@ -168,7 +183,6 @@ def telegram_webhook():
                     """
                     send_message(chat_id, welcome_text)
 
-        # === ДОБАВЛЯЕМЫЙ БЛОК ДЛЯ /events ===
         elif text == '/events':
             users_data = load_users()
             
@@ -192,7 +206,6 @@ def telegram_webhook():
                     message += f"👥 Участников: {event['participants']}\n\n"
                 
                 send_message(chat_id, message)
-        # === КОНЕЦ ДОБАВЛЯЕМОГО БЛОКА ===
 
         elif text.startswith('/'):
             # Игнорируем другие команды для непринятых пользователей
@@ -300,14 +313,6 @@ def reject_user(chat_id):
         return {'success': True}
     else:
         return {'success': False, 'error': 'Пользователь не найден'}
-
-@app.route('/')
-def hello_world():
-    return "<p>Бот работает! Админ-панель: <a href='/admin'>/admin</a></p>"
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
 
 # ==================== МЕРОПРИЯТИЯ ====================
 
@@ -438,19 +443,6 @@ def publish_event():
     <a href="/admin/events"><button>Вернуться к управлению мероприятиями</button></a>
     '''
 
-def notify_users_about_new_event(event):
-    """Уведомление всех одобренных пользователей о новом мероприятии"""
-    users_data = load_users()
-    
-    for user in users_data['approved']:
-        message = f"🎉 Новое мероприятие!\n\n"
-        message += f"📌 {event['name']}\n"
-        message += f"📝 {event['description'][:100]}...\n"
-        message += f"⏰ До: {event['end_date']}\n\n"
-        message += f"Используйте /events для просмотра и участия!"
-        
-        send_message(user['chat_id'], message)
-
 @app.route('/admin/view_events')
 def view_events():
     """Просмотр всех созданных мероприятий"""
@@ -476,5 +468,10 @@ def view_events():
     html += '<br><a href="/admin/events"><button>← Назад</button></a>'
     return html
 
+@app.route('/')
+def hello_world():
+    return "<p>Бот работает! Админ-панель: <a href='/admin'>/admin</a></p>"
 
-
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
