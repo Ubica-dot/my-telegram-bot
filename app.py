@@ -1,3 +1,5 @@
+import uuid
+from datetime import datetime
 import os
 import json
 import requests
@@ -165,6 +167,30 @@ def telegram_webhook():
 После проверки администратором вы получите уведомление о доступе.
                     """
                     send_message(chat_id, welcome_text)
+
+                elif text == '/events':
+            users_data = load_users()
+            
+            # Проверяем, одобрен ли пользователь
+            is_approved = any(user['chat_id'] == chat_id for user in users_data['approved'])
+            if not is_approved:
+                send_message(chat_id, "❌ У вас нет доступа к мероприятиям. Завершите регистрацию через /start")
+                return 'ok', 200
+            
+            published_events = [event for event in users_data.get('events', []) 
+                               if event.get('is_published', False)]
+            
+            if not published_events:
+                send_message(chat_id, "📅 На данный момент нет активных мероприятий.")
+            else:
+                message = "📅 Активные мероприятия:\n\n"
+                for event in published_events:
+                    message += f"🎪 {event['name']}\n"
+                    message += f"📝 {event['description'][:50]}...\n"
+                    message += f"⏰ До: {event['end_date']}\n"
+                    message += f"👥 Участников: {event['participants']}\n\n"
+                
+                send_message(chat_id, message)
         
         elif text.startswith('/'):
             # Игнорируем другие команды для непринятых пользователей
@@ -280,4 +306,172 @@ def hello_world():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+# ==================== МЕРОПРИЯТИЯ ====================
+
+@app.route('/admin/events')
+def admin_events_panel():
+    """Панель управления событиями"""
+    return '''
+    <h2>Управление мероприятиями</h2>
+    <a href="/admin/create_event"><button style="padding: 10px; margin: 5px;">🎇 Создать новое мероприятие</button></a>
+    <a href="/admin/view_events"><button style="padding: 10px; margin: 5px;">📋 Просмотр всех мероприятий</button></a>
+    <br><a href="/admin">← Назад в админ-панель</a>
+    '''
+
+@app.route('/admin/create_event')
+def create_event_form():
+    """Форма создания нового мероприятия"""
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Создание мероприятия</title>
+        <style>
+            body { font-family: Arial; margin: 20px; }
+            .form-group { margin: 15px 0; }
+            label { display: block; margin: 5px 0; }
+            input, textarea { width: 300px; padding: 8px; margin: 5px 0; }
+            button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+            .option-group { border: 1px solid #ddd; padding: 10px; margin: 10px 0; }
+        </style>
+    </head>
+    <body>
+        <h2>🎇 Создание нового мероприятия</h2>
+        <form action="/admin/publish_event" method="POST">
+            <div class="form-group">
+                <label><strong>1. Наименование мероприятия (максимум 2 строки):</strong></label>
+                <input type="text" name="event_name" placeholder="Введите название" required>
+            </div>
+            
+            <div class="form-group">
+                <label><strong>2. Правила и описание:</strong></label>
+                <textarea name="event_rules" rows="5" placeholder="Подробное описание правил..." required></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label><strong>3. Варианты выбора:</strong></label>
+                <div id="options-container">
+                    <div class="option-group">
+                        <input type="text" name="option_1" placeholder="Вариант №1" required>
+                    </div>
+                </div>
+                <button type="button" onclick="addOption()">➕ Добавить вариант</button>
+            </div>
+            
+            <div class="form-group">
+                <label><strong>4. Дата окончания мероприятия:</strong></label>
+                <input type="datetime-local" name="end_date" required>
+            </div>
+            
+            <button type="submit">📢 Опубликовать</button>
+        </form>
+        
+        <script>
+            let optionCount = 1;
+            function addOption() {
+                optionCount++;
+                const container = document.getElementById('options-container');
+                const newOption = document.createElement('div');
+                newOption.className = 'option-group';
+                newOption.innerHTML = `<input type="text" name="option_${optionCount}" placeholder="Вариант №${optionCount}" required>`;
+                container.appendChild(newOption);
+            }
+        </script>
+    </body>
+    </html>
+    '''
+
+@app.route('/admin/publish_event', methods=['POST'])
+def publish_event():
+    """Обработка данных формы и публикация мероприятия"""
+    users_data = load_users()
+    
+    # Получаем данные из формы
+    event_name = request.form['event_name']
+    event_rules = request.form['event_rules']
+    end_date = request.form['end_date']
+    
+    # Собираем все варианты с структурой для голосования
+    options = []
+    i = 1
+    while f'option_{i}' in request.form:
+        option_text = request.form[f'option_{i}']
+        if option_text.strip():
+            options.append({
+                "text": option_text,
+                "votes": 0,
+                "voters": []
+            })
+        i += 1
+    
+    # Создаем объект мероприятия
+    new_event = {
+        'id': str(uuid.uuid4())[:8],
+        'name': event_name,
+        'description': event_rules,
+        'options': options,
+        'end_date': end_date,
+        'is_published': True,
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'creator_id': ADMIN_ID,
+        'participants': 0
+    }
+    
+    # Добавляем мероприятие в данные
+    if 'events' not in users_data:
+        users_data['events'] = []
+    users_data['events'].append(new_event)
+    save_users(users_data)
+    
+    # Отправляем уведомление одобренным пользователям
+    notify_users_about_new_event(new_event)
+    
+    return f'''
+    <h2>✅ Мероприятие опубликовано!</h2>
+    <p><strong>Название:</strong> {event_name}</p>
+    <p><strong>Вариантов:</strong> {len(options)}</p>
+    <p><strong>Окончание:</strong> {end_date}</p>
+    <p><strong>Уведомления отправлены пользователям</strong></p>
+    <a href="/admin/events"><button>Вернуться к управлению мероприятиями</button></a>
+    '''
+
+def notify_users_about_new_event(event):
+    """Уведомление всех одобренных пользователей о новом мероприятии"""
+    users_data = load_users()
+    
+    for user in users_data['approved']:
+        message = f"🎉 Новое мероприятие!\n\n"
+        message += f"📌 {event['name']}\n"
+        message += f"📝 {event['description'][:100]}...\n"
+        message += f"⏰ До: {event['end_date']}\n\n"
+        message += f"Используйте /events для просмотра и участия!"
+        
+        send_message(user['chat_id'], message)
+
+@app.route('/admin/view_events')
+def view_events():
+    """Просмотр всех созданных мероприятий"""
+    users_data = load_users()
+    events = users_data.get('events', [])
+    
+    html = '<h2>📋 Все мероприятия</h2>'
+    if not events:
+        html += '<p>Мероприятий пока нет.</p>'
+    else:
+        for event in events:
+            status = "✅ Опубликовано" if event.get('is_published', False) else "⏳ Черновик"
+            html += f'''
+            <div style="border:1px solid #ccc; padding:15px; margin:10px 0;">
+                <h3>{event['name']} (ID: {event['id']})</h3>
+                <p><strong>Статус:</strong> {status}</p>
+                <p><strong>Описание:</strong> {event['description'][:100]}...</p>
+                <p><strong>Варианты:</strong> {", ".join(opt["text"] for opt in event["options"])}</p>
+                <p><strong>Окончание:</strong> {event['end_date']}</p>
+            </div>
+            '''
+    
+    html += '<br><a href="/admin/events"><button>← Назад</button></a>'
+    return html
+
 
