@@ -501,19 +501,88 @@ def mini_app():
                 margin: 15px 0;
                 text-align: center;
             }
+            /* Стили для страницы мероприятия */
+            #event-details-page { display: none; }
+            .back-btn {
+                background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+                color: var(--tg-theme-text-color, #000000);
+                margin-bottom: 20px;
+            }
+            .event-header {
+                background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+                padding: 20px;
+                border-radius: 12px;
+                margin-bottom: 20px;
+            }
+            .option-item {
+                background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+                padding: 15px;
+                border-radius: 8px;
+                margin: 10px 0;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .option-text {
+                flex-grow: 1;
+                font-size: 16px;
+            }
+            .buy-buttons {
+                display: flex;
+                gap: 10px;
+            }
+            .buy-btn {
+                padding: 8px 16px;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 14px;
+            }
+            .buy-yes {
+                background: #28a745;
+                color: white;
+            }
+            .buy-no {
+                background: #dc3545;
+                color: white;
+            }
+            .page-title {
+                text-align: center;
+                margin-bottom: 20px;
+            }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🎪 Мероприятия</h1>
-            
-            <div class="balance-info">
-                <h3>💰 Ваш баланс</h3>
-                <div id="user-balance">Загрузка...</div>
+            <!-- Главная страница со списком мероприятий -->
+            <div id="main-page">
+                <h1 class="page-title">🎪 Мероприятия</h1>
+                
+                <div class="balance-info">
+                    <h3>💰 Ваш баланс</h3>
+                    <div id="user-balance">Загрузка...</div>
+                </div>
+                
+                <div id="events-list">
+                    <p>Загрузка мероприятий...</p>
+                </div>
             </div>
-            
-            <div id="events-list">
-                <p>Загрузка мероприятий...</p>
+
+            <!-- Страница деталей мероприятия -->
+            <div id="event-details-page">
+                <button class="button back-btn" onclick="goBack()">← Назад к мероприятиям</button>
+                
+                <div class="event-header">
+                    <h2 id="event-title">Название мероприятия</h2>
+                    <p id="event-description">Описание мероприятия...</p>
+                    <p><strong>⏰ Окончание:</strong> <span id="event-end-date">дата</span></p>
+                    <p><strong>👥 Участников:</strong> <span id="event-participants">0</span></p>
+                </div>
+
+                <h3>Варианты для участия:</h3>
+                <div id="event-options">
+                    <!-- Здесь будут генерироваться варианты -->
+                </div>
             </div>
         </div>
         
@@ -521,7 +590,7 @@ def mini_app():
             let tg = window.Telegram.WebApp;
             tg.expand();
             tg.ready();
-            
+
             // Загрузка баланса пользователя
             async function loadBalance() {
                 try {
@@ -550,9 +619,9 @@ def mini_app():
                     eventsList.innerHTML = events.map(event => `
                         <div class="event-card">
                             <h3>${event.name}</h3>
-                            <p>${event.description}</p>
+                            <p>${event.description.substring(0, 100)}...</p>
                             <p><small>Участников: ${event.participants}</small></p>
-                            <p><small>До: ${new Date(event.end_date).toLocaleString()}</small></p>
+                            <p><small>До: ${new Date(event.end_date).toLocaleString('ru-RU')}</small></p>
                             <button class="button" onclick="showEventDetails('${event.event_uuid}')">
                                 Участвовать
                             </button>
@@ -564,12 +633,75 @@ def mini_app():
                 }
             }
             
-            function showEventDetails(eventId) {
+            // Показать детали мероприятия
+            async function showEventDetails(eventUuid) {
+                try {
+                    const response = await fetch(`/api/event/${eventUuid}`);
+                    const event = await response.json();
+                    
+                    if (event.error) {
+                        tg.showPopup({
+                            title: 'Ошибка',
+                            message: event.error,
+                            buttons: [{ type: 'ok' }]
+                        });
+                        return;
+                    }
+                    
+                    // Заполняем данные на странице мероприятия
+                    document.getElementById('event-title').textContent = event.name;
+                    document.getElementById('event-description').textContent = event.description;
+                    document.getElementById('event-end-date').textContent = new Date(event.end_date).toLocaleString('ru-RU');
+                    document.getElementById('event-participants').textContent = event.participants;
+                    
+                    // Отрисовываем варианты с кнопками покупки
+                    const optionsContainer = document.getElementById('event-options');
+                    optionsContainer.innerHTML = event.options.map((option, index) => `
+                        <div class="option-item">
+                            <div class="option-text">${option.text}</div>
+                            <div class="buy-buttons">
+                                <button class="buy-btn buy-yes" onclick="buyOption('${event.event_uuid}', ${index}, 'yes')">Купить Да</button>
+                                <button class="buy-btn buy-no" onclick="buyOption('${event.event_uuid}', ${index}, 'no')">Купить Нет</button>
+                            </div>
+                        </div>
+                    `).join('');
+                    
+                    // Переключаем видимость страниц
+                    document.getElementById('main-page').style.display = 'none';
+                    document.getElementById('event-details-page').style.display = 'block';
+                    
+                } catch (error) {
+                    console.error('Error loading event details:', error);
+                    tg.showPopup({
+                        title: 'Ошибка',
+                        message: 'Не удалось загрузить информацию о мероприятии',
+                        buttons: [{ type: 'ok' }]
+                    });
+                }
+            }
+            
+            function goBack() {
+                document.getElementById('main-page').style.display = 'block';
+                document.getElementById('event-details-page').style.display = 'none';
+            }
+            
+            function buyOption(eventUuid, optionIndex, type) {
                 tg.showPopup({
-                    title: 'Голосование',
-                    message: 'Функция голосования скоро будет доступна в Mini App!',
+                    title: 'Покупка',
+                    message: `Вы хотите купить "${type}" для варианта ${optionIndex + 1}?\n\nЭта функция будет реализована в ближайшее время!`,
                     buttons: [{ type: 'ok' }]
                 });
+                
+                // Здесь будет реализована логика покупки
+                // fetch('/api/buy', {
+                //     method: 'POST',
+                //     headers: { 'Content-Type': 'application/json' },
+                //     body: JSON.stringify({
+                //         event_uuid: eventUuid,
+                //         option_index: optionIndex,
+                //         type: type
+                //     })
+                // })
             }
             
             // Загружаем баланс и мероприятия при старте
@@ -590,6 +722,19 @@ def api_events():
     except Exception as e:
         print(f"API Error: {e}")
         return jsonify([])
+
+@app.route('/api/event/<event_uuid>')
+def api_event(event_uuid):
+    """API для получения конкретного мероприятия"""
+    try:
+        event = db.get_event_by_uuid(event_uuid)
+        if event:
+            return jsonify(event)
+        else:
+            return jsonify({'error': 'Мероприятие не найдено'}), 404
+    except Exception as e:
+        print(f"API Event Error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
 
 @app.route('/api/user/balance')
 def api_user_balance():
