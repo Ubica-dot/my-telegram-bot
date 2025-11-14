@@ -75,9 +75,12 @@ def ensure_webhook():
         print(f"[setWebhook] error: {e}")
 
 
-@app.before_first_request
-def _before_first_request():
-    ensure_webhook()
+@app.before_request
+def _init_once():
+    # Однократная инициализация при первом запросе к любому роуту
+    if not getattr(app, "_init_done", False):
+        ensure_webhook()
+        app._init_done = True
 
 
 # ---------------- Health ----------------
@@ -508,3 +511,4 @@ def publish_event():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
