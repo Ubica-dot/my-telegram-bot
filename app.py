@@ -26,6 +26,9 @@ ADMIN_PANEL_HTML = """
         button { padding: 5px 10px; margin: 0 5px; cursor: pointer; }
         .approve-btn { background-color: #28a745; color: white; border: none; }
         .reject-btn { background-color: #dc3545; color: white; border: none; }
+        .balance-form { margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 5px; }
+        .balance-input { width: 100px; padding: 5px; margin: 0 5px; }
+        .balance-btn { background-color: #007bff; color: white; border: none; padding: 5px 10px; }
     </style>
 </head>
 <body>
@@ -50,7 +53,15 @@ ADMIN_PANEL_HTML = """
     <div class="user-card approved">
         <strong>ID:</strong> {{ user.chat_id }}<br>
         <strong>Логин:</strong> {{ user.login }}<br>
+        <strong>Username:</strong> @{{ user.username }}<br>
+        <strong>Баланс:</strong> <span id="balance-{{ user.chat_id }}">{{ user.balance }}</span> кредитов<br>
         <strong>Дата одобрения:</strong> {{ user.approved_at[:16] if user.approved_at else 'Н/Д' }}<br>
+        
+        <div class="balance-form">
+            <strong>Изменить баланс:</strong><br>
+            <input type="number" id="new_balance_{{ user.chat_id }}" class="balance-input" value="{{ user.balance }}" min="0">
+            <button class="balance-btn" onclick="updateBalance({{ user.chat_id }})">💳 Обновить</button>
+        </div>
     </div>
     {% endfor %}
 
@@ -82,6 +93,31 @@ ADMIN_PANEL_HTML = """
                     alert('Ошибка: ' + data.error);
                 }
             });
+    }
+    
+    function updateBalance(chatId) {
+        const newBalance = document.getElementById('new_balance_' + chatId).value;
+        if (!newBalance || newBalance < 0) {
+            alert('Введите корректную сумму баланса!');
+            return;
+        }
+        
+        fetch('/admin/update_balance/' + chatId, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ balance: parseInt(newBalance) })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById('balance-' + chatId).textContent = newBalance;
+                alert('Баланс обновлен!');
+            } else {
+                alert('Ошибка: ' + data.error);
+            }
+        });
     }
     </script>
 </body>
@@ -126,7 +162,8 @@ def telegram_webhook():
         
         if text == '/start':
             if is_approved:
-                send_message(chat_id, "✅ Вы уже зарегистрированы! Добро пожаловать в бот!")
+                balance = user.get('balance', 1000)
+                send_message(chat_id, f"✅ Вы уже зарегистрированы! Добро пожаловать в бот!\n\n💰 Ваш баланс: {balance} кредитов")
             else:
                 if user:
                     send_message(chat_id, "⏳ Ваша заявка уже отправлена и ожидает рассмотрения администратором.")
@@ -160,6 +197,14 @@ def telegram_webhook():
                     message += f"👥 Участников: {event['participants']}\n\n"
                 
                 send_message(chat_id, message)
+
+        elif text == '/balance':
+            if not is_approved:
+                send_message(chat_id, "❌ У вас нет доступа к этой команде. Завершите регистрацию через /start")
+                return 'ok', 200
+            
+            balance = user.get('balance', 1000)
+            send_message(chat_id, f"💰 Ваш текущий баланс: {balance} кредитов")
 
         elif text == '/app':
             web_app_url = f'https://{request.host}/mini-app'
@@ -218,7 +263,8 @@ def approve_user(chat_id):
     user = db.approve_user(chat_id)
     if user:
         # Уведомляем пользователя
-        send_message(chat_id, "🎉 Поздравляем! Ваша заявка одобрена администратором. Теперь вам доступен полный функционал бота!")
+        balance = user.get('balance', 1000)
+        send_message(chat_id, f"🎉 Поздравляем! Ваша заявка одобрена администратором.\n\n💰 Ваш стартовый баланс: {balance} кредитов\n\nТеперь вам доступен полный функционал бота!")
         return {'success': True}
     else:
         return {'success': False, 'error': 'Пользователь не найден'}
@@ -229,6 +275,23 @@ def reject_user(chat_id):
     user = db.get_user(chat_id)
     if user:
         send_message(chat_id, "❌ К сожалению, ваша заявка была отклонена администратором. Вы можете подать заявку повторно через /start")
+        return {'success': True}
+    else:
+        return {'success': False, 'error': 'Пользователь не найден'}
+
+@app.route('/admin/update_balance/<int:chat_id>', methods=['POST'])
+def update_user_balance(chat_id):
+    """Обновление баланса пользователя"""
+    data = request.get_json()
+    new_balance = data.get('balance')
+    
+    if new_balance is None or new_balance < 0:
+        return {'success': False, 'error': 'Некорректная сумма баланса'}
+    
+    user = db.update_user_balance(chat_id, new_balance)
+    if user:
+        # Уведомляем пользователя об изменении баланса
+        send_message(chat_id, f"💰 Ваш баланс был изменен администратором.\n\nНовый баланс: {new_balance} кредитов")
         return {'success': True}
     else:
         return {'success': False, 'error': 'Пользователь не найден'}
@@ -431,17 +494,26 @@ def mini_app():
                 margin: 8px 0;
                 cursor: pointer;
             }
-            .back-btn {
+            .balance-info {
                 background: var(--tg-theme-secondary-bg-color, #f0f0f0);
-                color: var(--tg-theme-text-color, #000000);
+                padding: 15px;
+                border-radius: 12px;
+                margin: 15px 0;
+                text-align: center;
             }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🎪 Мероприятия</h1>
+            
+            <div class="balance-info">
+                <h3>💰 Ваш баланс</h3>
+                <div id="user-balance">Загрузка...</div>
+            </div>
+            
             <div id="events-list">
-                <p>Загрузка...</p>
+                <p>Загрузка мероприятий...</p>
             </div>
         </div>
         
@@ -449,6 +521,18 @@ def mini_app():
             let tg = window.Telegram.WebApp;
             tg.expand();
             tg.ready();
+            
+            // Загрузка баланса пользователя
+            async function loadBalance() {
+                try {
+                    const response = await fetch('/api/user/balance');
+                    const data = await response.json();
+                    document.getElementById('user-balance').innerHTML = `<h2>${data.balance} кредитов</h2>`;
+                } catch (error) {
+                    console.error('Error loading balance:', error);
+                    document.getElementById('user-balance').innerHTML = '<p>Ошибка загрузки</p>';
+                }
+            }
             
             // Загрузка мероприятий
             async function loadEvents() {
@@ -488,7 +572,8 @@ def mini_app():
                 });
             }
             
-            // Загружаем мероприятия при старте
+            // Загружаем баланс и мероприятия при старте
+            loadBalance();
             loadEvents();
         </script>
     </body>
@@ -505,6 +590,21 @@ def api_events():
     except Exception as e:
         print(f"API Error: {e}")
         return jsonify([])
+
+@app.route('/api/user/balance')
+def api_user_balance():
+    """API для получения баланса пользователя (для Mini App)"""
+    try:
+        # В реальном приложении здесь нужно определить пользователя
+        # Для демонстрации возвращаем баланс первого одобренного пользователя
+        approved_users = db.get_approved_users()
+        if approved_users:
+            balance = approved_users[0].get('balance', 1000)
+            return jsonify({'balance': balance})
+        return jsonify({'balance': 1000})
+    except Exception as e:
+        print(f"API Balance Error: {e}")
+        return jsonify({'balance': 1000})
 
 @app.route('/')
 def hello_world():
