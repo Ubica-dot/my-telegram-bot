@@ -131,6 +131,26 @@ class Database:
         except Exception as e:
             print(f"Error getting event votes: {e}")
             return []
+                
+    # === USERS BALANCE ===
+# В класс Database добавьте:
+
+def update_user_balance(self, chat_id, new_balance):
+    """Обновление баланса пользователя"""
+    try:
+        response = self.supabase.table('users').update({
+            'balance': new_balance,
+            'updated_at': datetime.now().isoformat()
+        }).eq('chat_id', chat_id).execute()
+        return response.data[0] if response.data else None
+    except Exception as e:
+        print(f"Error updating user balance: {e}")
+        return None
+
+def get_user_balance(self, chat_id):
+    """Получение баланса пользователя"""
+    user = self.get_user(chat_id)
+    return user.get('balance', 1000) if user else 1000
 
 # Глобальный экземпляр базы данных
 db = Database()
