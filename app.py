@@ -5,13 +5,14 @@ import requests
 from flask import Flask, request, render_template_string, jsonify
 from datetime import datetime
 from database import db
+from amm import PredictionMarketAMM
 
 # Получаем токен из переменных окружения
 TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = os.getenv('ADMIN_ID', '123456789')
 app = Flask(__name__)
 
-# HTML шаблон для админской панели
+# HTML шаблон для админской панели (остается без изменений)
 ADMIN_PANEL_HTML = """
 <!DOCTYPE html>
 <html>
@@ -239,7 +240,7 @@ def telegram_webhook():
     
     return 'ok', 200
 
-# Админская панель
+# Админская панель (остается без изменений)
 @app.route('/admin')
 def admin_panel():
     """Админская панель для управления заявками"""
@@ -392,8 +393,9 @@ def publish_event():
         i += 1
     
     # Создаем объект мероприятия для базы данных
+    event_uuid = str(uuid.uuid4())[:8]
     event_data = {
-        'event_uuid': str(uuid.uuid4())[:8],
+        'event_uuid': event_uuid,
         'name': event_name,
         'description': event_rules,
         'options': options,
@@ -407,6 +409,10 @@ def publish_event():
     new_event = db.create_event(event_data)
     
     if new_event:
+        # Создаем рынки предсказаний для каждого варианта
+        for option_index in range(len(options)):
+            db.create_prediction_market(event_uuid, option_index)
+        
         # Отправляем уведомление одобренным пользователям
         approved_users = db.get_approved_users()
         for user in approved_users:
@@ -423,6 +429,7 @@ def publish_event():
         <p><strong>Название:</strong> {event_name}</p>
         <p><strong>Вариантов:</strong> {len(options)}</p>
         <p><strong>Окончание:</strong> {end_date}</p>
+        <p><strong>Созданы рынки предсказаний для всех вариантов</strong></p>
         <p><strong>Уведомления отправлены пользователям</strong></p>
         <a href="/admin/events"><button>Вернуться к управлению мероприятиями</button></a>
         '''
@@ -456,6 +463,92 @@ def view_events():
     html += '<br><a href="/admin/events"><button>← Назад</button></a>'
     return html
 
+# ==================== PREDICTION MARKET API ====================
+
+@app.route('/api/market/<event_uuid>/<int:option_index>')
+def get_market_data(event_uuid, option_index):
+    """Получение данных рынка для конкретного варианта"""
+    try:
+        market = db.get_market_data(event_uuid, option_index)
+        if not market:
+            return jsonify({'error': 'Рынок не найден'}), 404
+        
+        amm = PredictionMarketAMM(market['total_yes_reserve'], market['total_no_reserve'])
+        market_data = amm.get_market_data()
+        market_data['market_id'] = market['id']
+        
+        return jsonify(market_data)
+    except Exception as e:
+        print(f"Market API Error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
+
+@app.route('/api/market/buy', methods=['POST'])
+def buy_shares():
+    """Покупка акций на рынке"""
+    try:
+        data = request.get_json()
+        user_chat_id = data.get('user_chat_id')
+        event_uuid = data.get('event_uuid')
+        option_index = data.get('option_index')
+        share_type = data.get('share_type')  # 'yes' или 'no'
+        amount = data.get('amount')
+        
+        if not all([user_chat_id, event_uuid, option_index is not None, share_type, amount]):
+            return jsonify({'error': 'Не все обязательные поля заполнены'}), 400
+        
+        # Проверяем баланс пользователя
+        user = db.get_user(user_chat_id)
+        if not user:
+            return jsonify({'error': 'Пользователь не найден'}), 404
+        
+        if user['balance'] < amount:
+            return jsonify({'error': 'Недостаточно средств'}), 400
+        
+        # Получаем данные рынка
+        market = db.get_market_data(event_uuid, option_index)
+        if not market:
+            return jsonify({'error': 'Рынок не найден'}), 404
+        
+        # Выполняем покупку через AMM
+        amm = PredictionMarketAMM(market['total_yes_reserve'], market['total_no_reserve'])
+        shares_received, new_price = amm.buy_shares(share_type, amount)
+        
+        if shares_received <= 0:
+            return jsonify({'error': 'Не удалось выполнить покупку'}), 400
+        
+        # Обновляем базу данных
+        db.update_market_reserves(
+            market['id'], 
+            amm.yes_reserve, 
+            amm.no_reserve, 
+            amm.constant_product
+        )
+        db.update_user_balance(user_chat_id, user['balance'] - amount)
+        db.add_user_shares(user_chat_id, market['id'], share_type, shares_received, new_price)
+        db.add_market_order(user_chat_id, market['id'], share_type, amount, new_price, shares_received)
+        
+        return jsonify({
+            'success': True,
+            'shares_received': shares_received,
+            'new_price': new_price,
+            'new_balance': user['balance'] - amount,
+            'market_data': amm.get_market_data()
+        })
+        
+    except Exception as e:
+        print(f"Buy API Error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
+
+@app.route('/api/user/<user_chat_id>/shares')
+def get_user_shares(user_chat_id):
+    """Получение акций пользователя"""
+    try:
+        shares = db.get_user_shares(user_chat_id)
+        return jsonify({'shares': shares})
+    except Exception as e:
+        print(f"User Shares API Error: {e}")
+        return jsonify({'error': 'Внутренняя ошибка сервера'}), 500
+
 # ==================== MINI APP ====================
 
 @app.route('/mini-app')
@@ -464,7 +557,7 @@ def mini_app():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Event Bot Mini App</title>
+        <title>Prediction Market Mini App</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -501,42 +594,47 @@ def mini_app():
                 margin: 15px 0;
                 text-align: center;
             }
-            /* Стили для страницы мероприятия */
-            #event-details-page { display: none; }
+            /* Стили для страницы рынка */
+            #market-page { display: none; }
             .back-btn {
                 background: var(--tg-theme-secondary-bg-color, #f0f0f0);
                 color: var(--tg-theme-text-color, #000000);
                 margin-bottom: 20px;
             }
-            .event-header {
+            .market-header {
                 background: var(--tg-theme-secondary-bg-color, #f0f0f0);
                 padding: 20px;
                 border-radius: 12px;
                 margin-bottom: 20px;
             }
-            .option-item {
+            .price-info {
+                display: flex;
+                justify-content: space-between;
+                margin: 15px 0;
+            }
+            .price-card {
                 background: var(--tg-theme-secondary-bg-color, #f0f0f0);
                 padding: 15px;
                 border-radius: 8px;
-                margin: 10px 0;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
+                text-align: center;
+                flex: 1;
+                margin: 0 5px;
             }
-            .option-text {
-                flex-grow: 1;
-                font-size: 16px;
+            .buy-section {
+                margin: 20px 0;
             }
             .buy-buttons {
                 display: flex;
                 gap: 10px;
+                margin: 10px 0;
             }
             .buy-btn {
-                padding: 8px 16px;
+                flex: 1;
+                padding: 12px;
                 border: none;
-                border-radius: 6px;
+                border-radius: 8px;
                 cursor: pointer;
-                font-size: 14px;
+                font-size: 16px;
             }
             .buy-yes {
                 background: #28a745;
@@ -546,9 +644,31 @@ def mini_app():
                 background: #dc3545;
                 color: white;
             }
-            .page-title {
-                text-align: center;
-                margin-bottom: 20px;
+            .modal {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0,0,0,0.5);
+                z-index: 1000;
+            }
+            .modal-content {
+                background: var(--tg-theme-bg-color, #ffffff);
+                margin: 15% auto;
+                padding: 20px;
+                border-radius: 12px;
+                width: 80%;
+                max-width: 400px;
+            }
+            .amount-input {
+                width: 100%;
+                padding: 10px;
+                margin: 10px 0;
+                border: 1px solid #ddd;
+                border-radius: 6px;
+                font-size: 16px;
             }
         </style>
     </head>
@@ -556,7 +676,7 @@ def mini_app():
         <div class="container">
             <!-- Главная страница со списком мероприятий -->
             <div id="main-page">
-                <h1 class="page-title">🎪 Мероприятия</h1>
+                <h1 class="page-title">🎪 Prediction Markets</h1>
                 
                 <div class="balance-info">
                     <h3>💰 Ваш баланс</h3>
@@ -568,20 +688,67 @@ def mini_app():
                 </div>
             </div>
 
-            <!-- Страница деталей мероприятия -->
-            <div id="event-details-page">
+            <!-- Страница рынка -->
+            <div id="market-page">
                 <button class="button back-btn" onclick="goBack()">← Назад к мероприятиям</button>
                 
-                <div class="event-header">
-                    <h2 id="event-title">Название мероприятия</h2>
-                    <p id="event-description">Описание мероприятия...</p>
-                    <p><strong>⏰ Окончание:</strong> <span id="event-end-date">дата</span></p>
-                    <p><strong>👥 Участников:</strong> <span id="event-participants">0</span></p>
+                <div class="market-header">
+                    <h2 id="market-title">Название рынка</h2>
+                    <p id="market-description">Описание...</p>
+                    <div class="price-info">
+                        <div class="price-card">
+                            <h3>Вероятность</h3>
+                            <div id="market-probability">0%</div>
+                        </div>
+                    </div>
                 </div>
 
-                <h3>Варианты для участия:</h3>
-                <div id="event-options">
-                    <!-- Здесь будут генерироваться варианты -->
+                <div class="price-info">
+                    <div class="price-card">
+                        <h3>Цена ДА</h3>
+                        <div id="yes-price">$0.00</div>
+                        <div id="yes-profit">Прибыль: $0.00</div>
+                    </div>
+                    <div class="price-card">
+                        <h3>Цена НЕТ</h3>
+                        <div id="no-price">$0.00</div>
+                        <div id="no-profit">Прибыль: $0.00</div>
+                    </div>
+                </div>
+
+                <div class="buy-section">
+                    <h3>Купить акции</h3>
+                    <div class="buy-buttons">
+                        <button class="buy-btn buy-yes" onclick="showBuyModal('yes')">Купить ДА</button>
+                        <button class="buy-btn buy-no" onclick="showBuyModal('no')">Купить НЕТ</button>
+                    </div>
+                </div>
+
+                <div id="user-shares-section">
+                    <h3>Ваши акции</h3>
+                    <div id="user-shares">Загрузка...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Модальное окно покупки -->
+        <div id="buy-modal" class="modal">
+            <div class="modal-content">
+                <h3 id="modal-title">Покупка акций</h3>
+                <p>Текущая цена: <span id="modal-price">$0.00</span></p>
+                <p>Подразумеваемая вероятность: <span id="modal-probability">0%</span></p>
+                
+                <label>Сумма покупки ($):</label>
+                <input type="number" id="buy-amount" class="amount-input" min="0.01" step="0.01" value="1.00">
+                
+                <div id="potential-profit">
+                    <p>Потенциальная прибыль: $<span id="profit-amount">0.00</span></p>
+                    <p>Получите акций: <span id="shares-amount">0</span></p>
+                </div>
+                
+                <div class="buy-buttons">
+                    <button class="buy-btn buy-yes" onclick="executeBuy()">Купить</button>
+                    <button class="button back-btn" onclick="closeModal()">Отмена</button>
                 </div>
             </div>
         </div>
@@ -590,6 +757,11 @@ def mini_app():
             let tg = window.Telegram.WebApp;
             tg.expand();
             tg.ready();
+
+            let currentMarket = null;
+            let currentShareType = null;
+            let currentEventUuid = null;
+            let currentOptionIndex = null;
 
             // Загрузка баланса пользователя
             async function loadBalance() {
@@ -622,8 +794,8 @@ def mini_app():
                             <p>${event.description.substring(0, 100)}...</p>
                             <p><small>Участников: ${event.participants}</small></p>
                             <p><small>До: ${new Date(event.end_date).toLocaleString('ru-RU')}</small></p>
-                            <button class="button" onclick="showEventDetails('${event.event_uuid}')">
-                                Участвовать
+                            <button class="button" onclick="showEventOptions('${event.event_uuid}', '${event.name}', '${event.description}')">
+                                Торговать
                             </button>
                         </div>
                     `).join('');
@@ -633,8 +805,8 @@ def mini_app():
                 }
             }
             
-            // Показать детали мероприятия
-            async function showEventDetails(eventUuid) {
+            // Показать варианты мероприятия
+            async function showEventOptions(eventUuid, eventName, eventDescription) {
                 try {
                     const response = await fetch(`/api/event/${eventUuid}`);
                     const event = await response.json();
@@ -648,33 +820,213 @@ def mini_app():
                         return;
                     }
                     
-                    // Заполняем данные на странице мероприятия
-                    document.getElementById('event-title').textContent = event.name;
-                    document.getElementById('event-description').textContent = event.description;
-                    document.getElementById('event-end-date').textContent = new Date(event.end_date).toLocaleString('ru-RU');
-                    document.getElementById('event-participants').textContent = event.participants;
-                    
-                    // Отрисовываем варианты с кнопками покупки
-                    const optionsContainer = document.getElementById('event-options');
-                    optionsContainer.innerHTML = event.options.map((option, index) => `
-                        <div class="option-item">
-                            <div class="option-text">${option.text}</div>
-                            <div class="buy-buttons">
-                                <button class="buy-btn buy-yes" onclick="buyOption('${event.event_uuid}', ${index}, 'yes')">Купить Да</button>
-                                <button class="buy-btn buy-no" onclick="buyOption('${event.event_uuid}', ${index}, 'no')">Купить Нет</button>
-                            </div>
+                    // Создаем список вариантов для торговли
+                    const optionsHTML = event.options.map((option, index) => `
+                        <div class="event-card">
+                            <h4>${option.text}</h4>
+                            <button class="button" onclick="showMarket('${eventUuid}', ${index}, '${eventName}', '${option.text}')">
+                                Открыть рынок
+                            </button>
                         </div>
                     `).join('');
                     
-                    // Переключаем видимость страниц
                     document.getElementById('main-page').style.display = 'none';
-                    document.getElementById('event-details-page').style.display = 'block';
+                    document.getElementById('market-page').style.display = 'block';
+                    
+                    document.getElementById('market-title').textContent = eventName;
+                    document.getElementById('market-description').textContent = eventDescription;
+                    document.getElementById('user-shares-section').style.display = 'none';
+                    
+                    document.getElementById('market-page').innerHTML += optionsHTML;
                     
                 } catch (error) {
-                    console.error('Error loading event details:', error);
+                    console.error('Error loading event options:', error);
                     tg.showPopup({
                         title: 'Ошибка',
-                        message: 'Не удалось загрузить информацию о мероприятии',
+                        message: 'Не удалось загрузить варианты мероприятия',
+                        buttons: [{ type: 'ok' }]
+                    });
+                }
+            }
+            
+            // Показать рынок для конкретного варианта
+            async function showMarket(eventUuid, optionIndex, eventName, optionText) {
+                try {
+                    currentEventUuid = eventUuid;
+                    currentOptionIndex = optionIndex;
+                    
+                    const response = await fetch(`/api/market/${eventUuid}/${optionIndex}`);
+                    const marketData = await response.json();
+                    
+                    if (marketData.error) {
+                        tg.showPopup({
+                            title: 'Ошибка',
+                            message: marketData.error,
+                            buttons: [{ type: 'ok' }]
+                        });
+                        return;
+                    }
+                    
+                    currentMarket = marketData;
+                    
+                    // Обновляем интерфейс рынка
+                    document.getElementById('market-title').textContent = `${eventName} - ${optionText}`;
+                    document.getElementById('market-probability').textContent = `${marketData.implied_probability.toFixed(2)}%`;
+                    document.getElementById('yes-price').textContent = `$${marketData.yes_price.toFixed(4)}`;
+                    document.getElementById('no-price').textContent = `$${marketData.no_price.toFixed(4)}`;
+                    
+                    // Расчет потенциальной прибыли
+                    const yesProfit = (1 - marketData.yes_price) * 1;
+                    const noProfit = (1 - marketData.no_price) * 1;
+                    
+                    document.getElementById('yes-profit').textContent = `Прибыль: $${yesProfit.toFixed(4)}`;
+                    document.getElementById('no-profit').textContent = `Прибыль: $${noProfit.toFixed(4)}`;
+                    
+                    // Загружаем акции пользователя
+                    await loadUserShares();
+                    document.getElementById('user-shares-section').style.display = 'block';
+                    
+                } catch (error) {
+                    console.error('Error loading market:', error);
+                    tg.showPopup({
+                        title: 'Ошибка',
+                        message: 'Не удалось загрузить данные рынка',
+                        buttons: [{ type: 'ok' }]
+                    });
+                }
+            }
+            
+            // Загрузка акций пользователя
+            async function loadUserShares() {
+                try {
+                    // Здесь нужно получить user_chat_id из Telegram Web App
+                    const userChatId = tg.initDataUnsafe.user?.id || 123456789; // Заглушка
+                    
+                    const response = await fetch(`/api/user/${userChatId}/shares`);
+                    const data = await response.json();
+                    
+                    if (data.shares && data.shares.length > 0) {
+                        const sharesHTML = data.shares.map(share => `
+                            <div class="event-card">
+                                <p>Тип: ${share.share_type === 'yes' ? 'ДА' : 'НЕТ'}</p>
+                                <p>Количество: ${share.quantity}</p>
+                                <p>Средняя цена: $${share.average_price}</p>
+                            </div>
+                        `).join('');
+                        document.getElementById('user-shares').innerHTML = sharesHTML;
+                    } else {
+                        document.getElementById('user-shares').innerHTML = '<p>У вас пока нет акций</p>';
+                    }
+                } catch (error) {
+                    console.error('Error loading user shares:', error);
+                    document.getElementById('user-shares').innerHTML = '<p>Ошибка загрузки</p>';
+                }
+            }
+            
+            // Показать модальное окно покупки
+            function showBuyModal(shareType) {
+                currentShareType = shareType;
+                
+                const modal = document.getElementById('buy-modal');
+                const title = document.getElementById('modal-title');
+                const price = document.getElementById('modal-price');
+                const probability = document.getElementById('modal-probability');
+                
+                if (shareType === 'yes') {
+                    title.textContent = 'Покупка акций ДА';
+                    price.textContent = `$${currentMarket.yes_price.toFixed(4)}`;
+                    probability.textContent = `${currentMarket.implied_probability.toFixed(2)}%`;
+                } else {
+                    title.textContent = 'Покупка акций НЕТ';
+                    price.textContent = `$${currentMarket.no_price.toFixed(4)}`;
+                    probability.textContent = `${(100 - currentMarket.implied_probability).toFixed(2)}%`;
+                }
+                
+                modal.style.display = 'block';
+                updateProfitCalculation();
+            }
+            
+            // Обновление расчета прибыли
+            function updateProfitCalculation() {
+                const amount = parseFloat(document.getElementById('buy-amount').value) || 0;
+                const profitElement = document.getElementById('profit-amount');
+                const sharesElement = document.getElementById('shares-amount');
+                
+                if (currentShareType === 'yes') {
+                    const profit = (1 - currentMarket.yes_price) * amount;
+                    const shares = amount / currentMarket.yes_price;
+                    profitElement.textContent = profit.toFixed(4);
+                    sharesElement.textContent = shares.toFixed(4);
+                } else {
+                    const profit = (1 - currentMarket.no_price) * amount;
+                    const shares = amount / currentMarket.no_price;
+                    profitElement.textContent = profit.toFixed(4);
+                    sharesElement.textContent = shares.toFixed(4);
+                }
+            }
+            
+            // Закрыть модальное окно
+            function closeModal() {
+                document.getElementById('buy-modal').style.display = 'none';
+            }
+            
+            // Выполнить покупку
+            async function executeBuy() {
+                try {
+                    const amount = parseFloat(document.getElementById('buy-amount').value) || 0;
+                    const userChatId = tg.initDataUnsafe.user?.id || 123456789; // Заглушка
+                    
+                    if (amount <= 0) {
+                        tg.showPopup({
+                            title: 'Ошибка',
+                            message: 'Введите корректную сумму',
+                            buttons: [{ type: 'ok' }]
+                        });
+                        return;
+                    }
+                    
+                    const response = await fetch('/api/market/buy', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            user_chat_id: userChatId,
+                            event_uuid: currentEventUuid,
+                            option_index: currentOptionIndex,
+                            share_type: currentShareType,
+                            amount: amount
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        tg.showPopup({
+                            title: 'Успех!',
+                            message: `Вы купили ${result.shares_received.toFixed(4)} акций`,
+                            buttons: [{ type: 'ok' }]
+                        });
+                        
+                        closeModal();
+                        // Обновляем данные рынка
+                        await showMarket(currentEventUuid, currentOptionIndex, 
+                                       document.getElementById('market-title').textContent, '');
+                        await loadBalance();
+                        await loadUserShares();
+                    } else {
+                        tg.showPopup({
+                            title: 'Ошибка',
+                            message: result.error,
+                            buttons: [{ type: 'ok' }]
+                        });
+                    }
+                    
+                } catch (error) {
+                    console.error('Error executing buy:', error);
+                    tg.showPopup({
+                        title: 'Ошибка',
+                        message: 'Не удалось выполнить покупку',
                         buttons: [{ type: 'ok' }]
                     });
                 }
@@ -682,27 +1034,13 @@ def mini_app():
             
             function goBack() {
                 document.getElementById('main-page').style.display = 'block';
-                document.getElementById('event-details-page').style.display = 'none';
+                document.getElementById('market-page').style.display = 'none';
+                currentMarket = null;
+                currentShareType = null;
             }
             
-            function buyOption(eventUuid, optionIndex, type) {
-                tg.showPopup({
-                    title: 'Покупка',
-                    message: `Вы хотите купить "${type}" для варианта ${optionIndex + 1}?\n\nЭта функция будет реализована в ближайшее время!`,
-                    buttons: [{ type: 'ok' }]
-                });
-                
-                // Здесь будет реализована логика покупки
-                // fetch('/api/buy', {
-                //     method: 'POST',
-                //     headers: { 'Content-Type': 'application/json' },
-                //     body: JSON.stringify({
-                //         event_uuid: eventUuid,
-                //         option_index: optionIndex,
-                //         type: type
-                //     })
-                // })
-            }
+            // Слушатель изменения суммы покупки
+            document.getElementById('buy-amount').addEventListener('input', updateProfitCalculation);
             
             // Загружаем баланс и мероприятия при старте
             loadBalance();
@@ -753,7 +1091,7 @@ def api_user_balance():
 
 @app.route('/')
 def hello_world():
-    return "<p>Бот работает! Админ-панель: <a href='/admin'>/admin</a></p>"
+    return "<p>Prediction Market Bot работает! Админ-панель: <a href='/admin'>/admin</a></p>"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
