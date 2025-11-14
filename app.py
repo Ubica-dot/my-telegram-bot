@@ -148,7 +148,13 @@ def telegram_webhook():
 
     elif text == "/app":
         web_app_url = f"https://{request.host}/mini-app"
-        kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]]}
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "Открыть Mini App", "web_app": {"url": web_app_url}}
+                ]
+            ]
+        }
         send_message(chat_id, "Откройте мини‑приложение для удобного просмотра мероприятий:", kb)
 
     elif text.startswith("/"):
