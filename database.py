@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Dict, Any
 from decimal import Decimal, getcontext
 
@@ -10,6 +10,20 @@ getcontext().prec = 28
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _monday_of_week_utc(dt: datetime) -> date:
+    # Неделя: понедельник 00:00:00Z — воскресенье 23:59:59
+    d = dt.date()
+    delta = timedelta(days=d.isoweekday() - 1)  # Mon=1..Sun=7
+    return d - delta
+
+
+def _format_range_label(start: date) -> str:
+    end = start + timedelta(days=6)
+    def fmt(d: date) -> str:
+        return d.strftime("%d.%m.%y")
+    return f"{fmt(start)}-{fmt(end)}"
 
 
 class DB:
@@ -25,6 +39,10 @@ class DB:
         res = self.client.table("users").select("*").eq("chat_id", chat_id).limit(1).execute()
         return res.data[0] if res.data else None
 
+    def get_approved_users(self) -> List[Dict[str, Any]]:
+        res = self.client.table("users").select("chat_id,login,balance,status").eq("status", "approved").execute()
+        return res.data or []
+
     def create_user(self, chat_id: int, login: str, username: str) -> Optional[Dict[str, Any]]:
         row = {
             "chat_id": chat_id,
@@ -39,10 +57,6 @@ class DB:
 
     def get_pending_users(self) -> List[Dict[str, Any]]:
         res = self.client.table("users").select("*").eq("status", "pending").order("created_at", desc=True).execute()
-        return res.data or []
-
-    def get_approved_users(self) -> List[Dict[str, Any]]:
-        res = self.client.table("users").select("*").eq("status", "approved").order("approved_at", desc=True).execute()
         return res.data or []
 
     def approve_user(self, chat_id: int) -> Optional[Dict[str, Any]]:
@@ -65,11 +79,7 @@ class DB:
 
     def get_published_events(self) -> List[Dict[str, Any]]:
         res = (
-            self.client.table("events")
-            .select("*")
-            .eq("is_published", True)
-            .order("end_date", desc=False)
-            .execute()
+            self.client.table("events").select("*").eq("is_published", True).order("end_date", desc=False).execute()
         )
         return res.data or []
 
@@ -163,11 +173,13 @@ class DB:
         # 3) Обновляем рынок
         upd = (
             self.client.table("prediction_markets")
-            .update({
-                "total_yes_reserve": float(new_yes),
-                "total_no_reserve": float(new_no),
-                "constant_product": float(new_yes * new_no),
-            })
+            .update(
+                {
+                    "total_yes_reserve": float(new_yes),
+                    "total_no_reserve": float(new_no),
+                    "constant_product": float(new_yes * new_no),
+                }
+            )
             .eq("id", row["id"])
             .execute()
         )
@@ -235,7 +247,7 @@ class DB:
             "no_reserve": float(market["total_no_reserve"]),
         }, None
 
-    # ---------- User positions ----------
+    # ---------- Positions / Equity ----------
     def get_user_positions(self, chat_id: int) -> List[Dict[str, Any]]:
         shares = (
             self.client.table("user_shares")
@@ -301,88 +313,20 @@ class DB:
             })
         return out
 
-    # ---------- Admin helpers ----------
-    def get_recent_orders(self, limit: int = 200) -> List[Dict[str, Any]]:
-        orders = (
-            self.client.table("market_orders")
-            .select("*")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        ).data or []
+    def _current_equities_all(self) -> Dict[int, float]:
+        # equity = balance + sum(q * EV), где EV для YES = P(YES), для NO = 1 - P(YES)
+        users = self.get_approved_users()
+        balances = {u["chat_id"]: float(u.get("balance", 0)) for u in users}
 
-        if not orders:
-            return []
-
-        market_ids = sorted({o["market_id"] for o in orders if o.get("market_id") is not None})
-        markets = {}
-        if market_ids:
-            mdata = (
-                self.client.table("prediction_markets")
-                .select("*")
-                .in_("id", market_ids)
-                .execute()
-            ).data or []
-            for m in mdata:
-                markets[m["id"]] = m
-
-        event_uuids = sorted({markets[o["market_id"]]["event_uuid"] for o in orders if o["market_id"] in markets})
-        events = {}
-        if event_uuids:
-            edata = (
-                self.client.table("events")
-                .select("*")
-                .in_("event_uuid", event_uuids)
-                .execute()
-            ).data or []
-            for e in edata:
-                events[e["event_uuid"]] = e
-
-        out = []
-        for o in orders:
-            m = markets.get(o["market_id"])
-            if not m:
-                continue
-            ev = events.get(m["event_uuid"], {})
-            yes_p, no_p = self._prices_from_row(m)
-            opts = ev.get("options") or []
-            opt_idx = m.get("option_index", 0)
-            opt_text = ""
-            try:
-                opt_text = (opts[opt_idx] or {}).get("text", "")
-            except Exception:
-                opt_text = ""
-            side = (o.get("order_type") or "").replace("buy_", "")
-            out.append({
-                "id": o["id"],
-                "created_at": o.get("created_at", ""),
-                "user_chat_id": o.get("user_chat_id"),
-                "side": side,
-                "amount": float(o.get("amount", 0)),
-                "shares": float(o.get("shares", 0)),
-                "price": float(o.get("price", 0)),
-                "market_id": o.get("market_id"),
-                "event_uuid": m["event_uuid"],
-                "event_name": ev.get("name", ""),
-                "option_index": opt_idx,
-                "option_text": opt_text,
-                "current_yes_price": yes_p,
-                "current_no_price": no_p,
-            })
-        return out
-
-    def get_all_positions(self, limit: int = 500) -> List[Dict[str, Any]]:
         shares = (
             self.client.table("user_shares")
-            .select("*")
-            .order("created_at", desc=True)
-            .limit(limit)
+            .select("user_chat_id,market_id,share_type,quantity")
             .execute()
         ).data or []
         if not shares:
-            return []
+            return balances
 
-        market_ids = sorted({s["market_id"] for s in shares if s.get("market_id") is not None})
+        market_ids = sorted({s["market_id"] for s in shares if s.get("market_id")})
         markets = {}
         if market_ids:
             mdata = (
@@ -394,47 +338,70 @@ class DB:
             for m in mdata:
                 markets[m["id"]] = m
 
-        event_uuids = sorted({markets[s["market_id"]]["event_uuid"] for s in shares if s["market_id"] in markets})
-        events = {}
-        if event_uuids:
-            edata = (
-                self.client.table("events")
-                .select("*")
-                .in_("event_uuid", event_uuids)
-                .execute()
-            ).data or []
-            for e in edata:
-                events[e["event_uuid"]] = e
-
-        out = []
+        ev_sum: Dict[int, Decimal] = {cid: Decimal("0") for cid in balances.keys()}
         for s in shares:
+            cid = s["user_chat_id"]
             mid = s["market_id"]
+            side = s["share_type"]
+            q = Decimal(str(s["quantity"]))
             m = markets.get(mid)
             if not m:
                 continue
-            ev = events.get(m["event_uuid"], {})
-            yes_p, no_p = self._prices_from_row(m)
-            opts = ev.get("options") or []
-            opt_idx = m.get("option_index", 0)
-            opt_text = ""
-            try:
-                opt_text = (opts[opt_idx] or {}).get("text", "")
-            except Exception:
-                opt_text = ""
-            out.append({
-                "user_chat_id": s.get("user_chat_id"),
-                "market_id": mid,
-                "event_uuid": m["event_uuid"],
-                "event_name": ev.get("name", ""),
-                "option_index": opt_idx,
-                "option_text": opt_text,
-                "share_type": s["share_type"],
-                "quantity": float(s["quantity"]),
-                "average_price": float(s["average_price"]),
-                "current_yes_price": yes_p,
-                "current_no_price": no_p,
-            })
-        return out
+            yes_p, _no_p = self._prices_from_row(m)
+            ev_per_share = Decimal(str(yes_p if side == "yes" else (1 - yes_p)))
+            ev_sum[cid] = ev_sum.get(cid, Decimal("0")) + q * ev_per_share
+
+        equities = {}
+        for cid, bal in balances.items():
+            equities[cid] = float(Decimal(str(bal)) + ev_sum.get(cid, Decimal("0")))
+        return equities
+
+    # ---------- Weekly baselines / Leaderboard ----------
+    def week_current_bounds(self) -> Dict[str, str]:
+        now = datetime.now(timezone.utc)
+        start = _monday_of_week_utc(now)
+        end = start + timedelta(days=6)
+        return {"start": start.isoformat(), "end": end.isoformat(), "label": _format_range_label(start)}
+
+    def _get_existing_baselines(self, week_start_iso: str) -> Dict[int, float]:
+        rows = (
+            self.client.table("weekly_baselines")
+            .select("user_chat_id,equity")
+            .eq("week_start", week_start_iso)
+            .execute()
+        ).data or []
+        return {r["user_chat_id"]: float(r["equity"]) for r in rows}
+
+    def _insert_missing_baselines(self, week_start_iso: str, equities: Dict[int, float], existing: Dict[int, float]):
+        to_add = []
+        for cid, eq in equities.items():
+            if cid not in existing:
+                to_add.append({
+                    "user_chat_id": cid,
+                    "week_start": week_start_iso,
+                    "equity": float(eq),
+                    "created_at": _now(),
+                })
+        if to_add:
+            self.client.table("weekly_baselines").insert(to_add).execute()
+
+    def get_leaderboard(self, week_start_iso: str, limit: int = 50) -> List[Dict[str, Any]]:
+        equities = self._current_equities_all()
+        existing = self._get_existing_baselines(week_start_iso)
+        self._insert_missing_baselines(week_start_iso, equities, existing)
+        baselines = self._get_existing_baselines(week_start_iso)
+
+        users = self.get_approved_users()
+        u_login = {u["chat_id"]: u.get("login", "") for u in users}
+
+        items = []
+        for cid, cur_eq in equities.items():
+            base = baselines.get(cid, cur_eq)
+            earned = cur_eq - base
+            items.append({"chat_id": cid, "login": u_login.get(cid, ""), "earned": float(earned)})
+
+        items.sort(key=lambda x: x["earned"], reverse=True)
+        return items[:limit]
 
 
 db = DB()
