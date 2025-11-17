@@ -209,16 +209,18 @@ MINI_APP_HTML = """
     .opt  { padding: 10px; border: 1px dashed #ccc; border-radius: 10px; margin: 6px 0;
             display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: stretch; }
     .opt-title { display:flex; align-items:center; font-weight: 700; }
-    .btn  { padding: 8px 12px; border: 0; border-radius: 10px; cursor: pointer; font-size: 14px; }
-    /* Мягкие фоны (без alpha), текст — насыщенный цвет. Без обводки. */
+    .btn  { padding: 8px 12px; border: 0; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 700;
+            transition: background-color .18s ease, color .18s ease; }
+    /* Мягкие фоны (без alpha). На hover — насыщенный фон, текст — бледный в тон исходному фону */
     .yes  { background: #CDEAD2; color: #2e7d32; }
     .no   { background: #F3C7C7; color: #c62828; }
-    .yes:hover { background: #BFE1C6; }
-    .no:hover  { background: #ECB3B3; }
+    .yes:hover { background: #2e7d32; color: #CDEAD2; }
+    .no:hover  { background: #c62828; color: #F3C7C7; }
     .actions { display:flex; gap: 8px; align-items: stretch; height: 100%; }
     .actions .btn { height: 100%; display:flex; align-items:center; justify-content:center; }
     .muted { color: #666; font-size: 14px; }
     .meta { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:12px; color:#666; }
+    .meta-right { margin-left:auto; text-align:right; flex:0 0 auto; }
     .section { margin: 20px 0; }
     .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; }
     .section-title { font-weight:600; }
@@ -240,7 +242,7 @@ MINI_APP_HTML = """
     .modal h3 { margin:0 0 8px 0; }
     .modal .row { justify-content: flex-start; }
     input[type=number] { padding:8px; width: 140px; }
-    /* active bets (casino-like payout on right) */
+    /* active bets */
     .bet { display:flex; align-items:center; justify-content:space-between; gap:12px; }
     .bet-info { flex: 1 1 auto; }
     .bet-win { flex: 0 0 auto; text-align:right; }
@@ -294,20 +296,24 @@ MINI_APP_HTML = """
 
             {% for idx, opt in enumerate(e.options) %}
               {% set md = e.markets.get(idx, {'yes_price': 0.5, 'volume': 0, 'end_short': e.end_short}) %}
+              {% set yes_pct = ('%.0f' % (md.yes_price * 100)) %}
+              {% set no_pct  = ('%.0f' % ((1 - md.yes_price) * 100)) %}
               <div class="opt" data-option="{{ idx }}">
                 <div class="opt-title">{{ opt.text }}</div>
-                <div class="prob" title="Вероятность ДА">{{ ('%.0f' % (md.yes_price * 100)) }}%</div>
+                <div class="prob" title="Вероятность ДА">{{ yes_pct }}%</div>
                 <div class="actions">
                   <button class="btn yes buy-btn"
                           data-event="{{ e.event_uuid }}"
                           data-index="{{ idx }}"
                           data-side="yes"
+                          data-prob="{{ yes_pct }}"
                           data-text="{{ opt.text|e }}">ДА</button>
 
                   <button class="btn no buy-btn"
                           data-event="{{ e.event_uuid }}"
                           data-index="{{ idx }}"
                           data-side="no"
+                          data-prob="{{ no_pct }}"
                           data-text="{{ opt.text|e }}">НЕТ</button>
                 </div>
                 <div class="meta">
@@ -319,7 +325,7 @@ MINI_APP_HTML = """
                       {{ vol }} кредитов
                     {% endif %}
                   </div>
-                  <div>До {{ md.end_short }}</div>
+                  <div class="meta-right">До {{ md.end_short }}</div>
                 </div>
               </div>
             {% endfor %}
@@ -525,6 +531,22 @@ MINI_APP_HTML = """
       });
     }
 
+    // --- Логика hover: подмена текста кнопки на вероятность ---
+    document.addEventListener('mouseenter', (ev) => {
+      const btn = ev.target.closest('.buy-btn');
+      if (!btn) return;
+      btn.dataset.label = btn.textContent.trim();
+      const prob = btn.dataset.prob ? `${btn.dataset.prob}%` : btn.textContent.trim();
+      btn.textContent = prob;
+    }, true);
+
+    document.addEventListener('mouseleave', (ev) => {
+      const btn = ev.target.closest('.buy-btn');
+      if (!btn) return;
+      const label = btn.dataset.label || (btn.dataset.side === 'yes' ? 'ДА' : 'НЕТ');
+      btn.textContent = label;
+    }, true);
+
     // --- Лидеры ---
     async function fetchLeaderboard() {
       const cid = getChatId();
@@ -603,7 +625,7 @@ MINI_APP_HTML = """
           if (probEl) probEl.textContent = `${Math.round(data.market.yes_price * 100)}%`;
         }
 
-        await fetchMe();         // баланс + активные ставки
+        await fetchMe();
         if (document.getElementById("section-leaders").style.display !== "none") fetchLeaderboard();
 
         closeBuy();
@@ -640,11 +662,9 @@ MINI_APP_HTML = """
 
 def _format_end_short(end_iso: str) -> str:
     try:
-        # ожидаем ISO, берём дату
         dt = datetime.fromisoformat(end_iso.replace(" ", "T").split(".")[0])
         return dt.strftime("%d.%m.%y")
     except Exception:
-        # fallback: YYYY-MM-DD...
         s = end_iso[:10]
         if len(s) == 10 and s[4] == "-" and s[7] == "-":
             y, m, d = s.split("-")
@@ -657,7 +677,6 @@ def mini_app():
     events = db.get_published_events()
     enriched = []
     for e in events:
-        # подготовим короткую дату для отображения
         end_iso = str(e.get("end_date", ""))
         e["end_short"] = _format_end_short(end_iso)
 
@@ -667,10 +686,8 @@ def mini_app():
             yes = float(m["total_yes_reserve"])
             no = float(m["total_no_reserve"])
             total = yes + no
-            # вероятность для YES
             yp = (no / total) if total > 0 else 0.5
-            # объём ставок: сколько денег вошло в пул, сверх начальных резервов (1000+1000)
-            volume = max(0.0, total - 2000.0)
+            volume = max(0.0, total - 2000.0)  # суммарные «заведённые» кредиты в пул
             markets[m["option_index"]] = {"yes_price": yp, "volume": volume, "end_short": e["end_short"]}
         e["markets"] = markets
         enriched.append(e)
