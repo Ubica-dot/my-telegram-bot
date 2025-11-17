@@ -205,7 +205,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ---------------- Mini App (вероятность ДА и новые кнопки «Да/Нет») ----------------
+# ---------------- Mini App (баланс сверху, вероятность ДА, кнопки «Да/Нет») ----------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -232,6 +232,7 @@ MINI_APP_HTML = """
     .collapsed .caret { transform: rotate(-90deg); }
     .section-body { padding:10px 0 0 0; }
     .prob { color:#000; font-weight:700; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
+    .balance { text-align:center; font-weight:800; font-size:22px; margin: 6px 0 10px; }
     /* modal */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
     .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
@@ -241,6 +242,9 @@ MINI_APP_HTML = """
   </style>
 </head>
 <body>
+
+  <!-- Баланс пользователя -->
+  <div id="balance" class="balance">Баланс: —</div>
 
   <!-- Активные ставки -->
   <div id="wrap-active" class="section">
@@ -363,11 +367,12 @@ MINI_APP_HTML = """
       });
     }
 
-    // --- Профиль и активные позиции ---
+    // --- Баланс + активные позиции ---
     async function fetchMe() {
       const cid = getChatId();
       const activeDiv = document.getElementById("active");
       if (!cid) {
+        document.getElementById("balance").textContent = "Баланс: —";
         activeDiv.textContent = "Не удалось получить chat_id. Откройте Mini App из чата командой /app.";
         return;
       }
@@ -376,21 +381,26 @@ MINI_APP_HTML = """
         const r = await fetch(url);
         const data = await r.json();
         if (!r.ok || !data.success) {
+          document.getElementById("balance").textContent = "Баланс: —";
           activeDiv.textContent = "Ошибка загрузки профиля.";
           return;
         }
+        renderBalance(data);
         renderActive(data);
       } catch (e) {
+        document.getElementById("balance").textContent = "Баланс: —";
         activeDiv.textContent = "Сетевая ошибка.";
       }
+    }
+
+    function renderBalance(data) {
+      const bal = data.user && typeof data.user.balance !== 'undefined' ? data.user.balance : "—";
+      document.getElementById("balance").textContent = `Баланс: ${bal} кредитов`;
     }
 
     function renderActive(data) {
       const div = document.getElementById("active");
       div.innerHTML = "";
-      const p = document.createElement("div");
-      p.innerHTML = `<b>Баланс:</b> ${data.user.balance} кредитов`;
-      div.appendChild(p);
 
       if (!data.positions || data.positions.length === 0) {
         const m = document.createElement("div");
@@ -474,7 +484,7 @@ MINI_APP_HTML = """
           }
         }
 
-        // Перерисуем активные ставки и баланс
+        // Перерисуем баланс и активные ставки
         await fetchMe();
 
         closeBuy();
