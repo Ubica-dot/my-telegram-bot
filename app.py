@@ -636,8 +636,8 @@ MINI_APP_HTML = """
         if (document.getElementById("section-leaders").style.display !== "none") fetchLeaderboard(currentPeriod);
 
         closeBuy();
-        if (tg && tg.showPopup) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${buyCtx.side.toUpperCase()})` });
-        else alert("Успех: куплено " + data.trade.got_shares.toFixed(4)} акций");
+        if (tg && tg.showPopup) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4) + " акций" (${buyCtx.side.toUpperCase()})` });
+        else alert("Успех: куплено " + data.trade.got_shares.toFixed(4) + " акций");
       } catch (e) { console.error(e); alert("Сетевая ошибка"); }
     }
 
@@ -984,4 +984,5 @@ def admin_unban(chat_id: int):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
 
