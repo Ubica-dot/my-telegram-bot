@@ -534,7 +534,7 @@ MINI_APP_HTML = """
         items.forEach((it, i) => {
           const row = document.createElement("div");
           row.className = "lb-row";
-          const sig = (typeof CHAT_ID !== 'undefined' && SIG) ? `&sig=${SIG}` : "";
+          const sig = (SIG ? `&sig=${SIG}` : "");
           const avaUrl = `/api/userpic?chat_id=${it.chat_id}${sig}`;
           const initials = (it.login || "U").slice(0,2).toUpperCase();
 
@@ -544,7 +544,7 @@ MINI_APP_HTML = """
               <div style="position:absolute; inset:0; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; color:#fff; background:linear-gradient(135deg,#6a5acd,#00bcd4)" data-ph>${initials}</div>
               <img src="${avaUrl}" class="lb-ava" style="display:none" onload="this.style.display='block'; this.previousElementSibling.style.display='none';" onerror="this.style.display='none'; this.previousElementSibling.style.display='flex';">
             </div>
-            <div class="lb-login">${it.login or '—'}</div>
+            <div class="lb-login">${it.login || '—'}</div>
             <div class="lb-val">${(+it.earned).toFixed(2)}</div>
           `;
           lb.appendChild(row);
