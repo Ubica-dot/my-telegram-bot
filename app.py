@@ -205,7 +205,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ---------------- Mini App (вероятность ДА слева от кнопок, без цен) ----------------
+# ---------------- Mini App (вероятность ДА и новые кнопки «Да/Нет») ----------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -216,11 +216,14 @@ MINI_APP_HTML = """
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }
     .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
-    .opt  { padding: 8px; border: 1px dashed #ccc; border-radius: 8px; margin: 6px 0; }
-    .btn  { padding: 8px 10px; margin-right: 8px; border: 0; border-radius: 8px; cursor: pointer; color: #fff; font-size: 14px; }
+    .opt  { padding: 10px; border: 1px dashed #ccc; border-radius: 10px; margin: 6px 0;
+            display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: stretch; }
+    .opt-title { display:flex; align-items:center; font-weight: 700; }
+    .btn  { padding: 8px 12px; border: 0; border-radius: 10px; cursor: pointer; color: #fff; font-size: 14px; }
     .yes  { background: #2e7d32; }
     .no   { background: #c62828; }
-    .row  { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .actions { display:flex; gap: 8px; align-items: stretch; height: 100%; }
+    .actions .btn { height: 100%; display:flex; align-items:center; justify-content:center; }
     .muted { color: #666; font-size: 14px; }
     .section { margin: 16px 0; }
     .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; }
@@ -228,7 +231,7 @@ MINI_APP_HTML = """
     .caret { transition: transform .15s ease; }
     .collapsed .caret { transform: rotate(-90deg); }
     .section-body { padding:10px 0 0 0; }
-    .prob { color:#000; font-weight:700; font-size:18px; margin-right:12px; }
+    .prob { color:#000; font-weight:700; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
     /* modal */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
     .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
@@ -265,24 +268,22 @@ MINI_APP_HTML = """
             <p>{{ e.description }}</p>
 
             {% for idx, opt in enumerate(e.options) %}
-              {% set md = e.markets.get(idx, {'yes_price': 0.5, 'no_price': 0.5}) %}
+              {% set md = e.markets.get(idx, {'yes_price': 0.5}) %}
               <div class="opt" data-option="{{ idx }}">
-                <div><b>{{ opt.text }}</b></div>
-                <div class="row">
-                  <div class="prob" title="Вероятность ДА">{{ ('%.0f' % (md.yes_price * 100)) }}%</div>
-                  <div>
-                    <button class="btn yes buy-btn"
-                            data-event="{{ e.event_uuid }}"
-                            data-index="{{ idx }}"
-                            data-side="yes"
-                            data-text="{{ opt.text|e }}">Купить ДА</button>
+                <div class="opt-title">{{ opt.text }}</div>
+                <div class="prob" title="Вероятность ДА">{{ ('%.0f' % (md.yes_price * 100)) }}%</div>
+                <div class="actions">
+                  <button class="btn yes buy-btn"
+                          data-event="{{ e.event_uuid }}"
+                          data-index="{{ idx }}"
+                          data-side="yes"
+                          data-text="{{ opt.text|e }}">Да</button>
 
-                    <button class="btn no buy-btn"
-                            data-event="{{ e.event_uuid }}"
-                            data-index="{{ idx }}"
-                            data-side="no"
-                            data-text="{{ opt.text|e }}">Купить НЕТ</button>
-                  </div>
+                  <button class="btn no buy-btn"
+                          data-event="{{ e.event_uuid }}"
+                          data-index="{{ idx }}"
+                          data-side="no"
+                          data-text="{{ opt.text|e }}">Нет</button>
                 </div>
               </div>
             {% endfor %}
