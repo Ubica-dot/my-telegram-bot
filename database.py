@@ -15,7 +15,6 @@ def _now() -> str:
 class DB:
     def __init__(self):
         url = os.getenv("SUPABASE_URL")
-        # Лучше service_role, но поддержим и обычный ключ
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
         if not url or not key:
             raise RuntimeError("SUPABASE_URL/SUPABASE_KEY not set")
@@ -32,7 +31,7 @@ class DB:
             "login": login,
             "username": username,
             "status": "pending",
-            "balance": 1000,  # убедитесь, что колонка добавлена миграцией
+            "balance": 1000,
             "created_at": _now(),
         }
         res = self.client.table("users").insert(row).execute()
@@ -74,7 +73,7 @@ class DB:
         )
         return res.data or []
 
-    # ---------- Markets (prediction_markets) ----------
+    # ---------- Markets ----------
     def create_prediction_market(self, event_uuid: str, option_index: int) -> Optional[Dict[str, Any]]:
         row = {
             "event_uuid": event_uuid,
@@ -117,6 +116,7 @@ class DB:
         no_p = float(y / total)
         return yes_p, no_p
 
+    # ---------- Trade ----------
     def trade_buy(self, *, chat_id: int, event_uuid: str, option_index: int, side: str, amount: float):
         # 1) Пользователь и баланс
         u = self.get_user(chat_id)
@@ -198,12 +198,13 @@ class DB:
                 "average_price": float(new_avg),
             }).eq("id", us["id"]).execute()
         else:
-            self.client.table("user_shares").upsert({
+            self.client.table("user_shares").insert({
                 "user_chat_id": chat_id,
                 "market_id": row["id"],
                 "share_type": side,
                 "quantity": float(shares),
                 "average_price": float(Decimal(str(amount)) / shares),
+                "created_at": _now(),
             }).execute()
 
         # 6) Ордер
@@ -216,6 +217,7 @@ class DB:
             "price": float(trade_price),
             "shares": float(shares),
             "status": "completed",
+            "created_at": _now(),
         }).execute()
 
         return {
@@ -232,6 +234,207 @@ class DB:
             "yes_reserve": float(market["total_yes_reserve"]),
             "no_reserve": float(market["total_no_reserve"]),
         }, None
+
+    # ---------- User positions ----------
+    def get_user_positions(self, chat_id: int) -> List[Dict[str, Any]]:
+        shares = (
+            self.client.table("user_shares")
+            .select("*")
+            .eq("user_chat_id", chat_id)
+            .order("created_at", desc=True)
+            .execute()
+        ).data or []
+        if not shares:
+            return []
+
+        market_ids = sorted({s["market_id"] for s in shares if s.get("market_id") is not None})
+        markets = {}
+        if market_ids:
+            mdata = (
+                self.client.table("prediction_markets")
+                .select("*")
+                .in_("id", market_ids)
+                .execute()
+            ).data or []
+            for m in mdata:
+                markets[m["id"]] = m
+
+        event_uuids = sorted({markets[s["market_id"]]["event_uuid"] for s in shares if s["market_id"] in markets})
+        events = {}
+        if event_uuids:
+            edata = (
+                self.client.table("events")
+                .select("*")
+                .in_("event_uuid", event_uuids)
+                .execute()
+            ).data or []
+            for e in edata:
+                events[e["event_uuid"]] = e
+
+        out = []
+        for s in shares:
+            mid = s["market_id"]
+            m = markets.get(mid)
+            if not m:
+                continue
+            ev = events.get(m["event_uuid"], {})
+            yes_p, no_p = self._prices_from_row(m)
+            opts = ev.get("options") or []
+            opt_idx = m.get("option_index", 0)
+            opt_text = ""
+            try:
+                opt_text = (opts[opt_idx] or {}).get("text", "")
+            except Exception:
+                opt_text = ""
+            out.append({
+                "user_chat_id": chat_id,
+                "market_id": mid,
+                "event_uuid": m["event_uuid"],
+                "event_name": ev.get("name", ""),
+                "option_index": opt_idx,
+                "option_text": opt_text,
+                "share_type": s["share_type"],
+                "quantity": float(s["quantity"]),
+                "average_price": float(s["average_price"]),
+                "current_yes_price": yes_p,
+                "current_no_price": no_p,
+            })
+        return out
+
+    # ---------- Admin helpers ----------
+    def get_recent_orders(self, limit: int = 200) -> List[Dict[str, Any]]:
+        orders = (
+            self.client.table("market_orders")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        ).data or []
+
+        if not orders:
+            return []
+
+        market_ids = sorted({o["market_id"] for o in orders if o.get("market_id") is not None})
+        markets = {}
+        if market_ids:
+            mdata = (
+                self.client.table("prediction_markets")
+                .select("*")
+                .in_("id", market_ids)
+                .execute()
+            ).data or []
+            for m in mdata:
+                markets[m["id"]] = m
+
+        event_uuids = sorted({markets[o["market_id"]]["event_uuid"] for o in orders if o["market_id"] in markets})
+        events = {}
+        if event_uuids:
+            edata = (
+                self.client.table("events")
+                .select("*")
+                .in_("event_uuid", event_uuids)
+                .execute()
+            ).data or []
+            for e in edata:
+                events[e["event_uuid"]] = e
+
+        out = []
+        for o in orders:
+            m = markets.get(o["market_id"])
+            if not m:
+                continue
+            ev = events.get(m["event_uuid"], {})
+            yes_p, no_p = self._prices_from_row(m)
+            opts = ev.get("options") or []
+            opt_idx = m.get("option_index", 0)
+            opt_text = ""
+            try:
+                opt_text = (opts[opt_idx] or {}).get("text", "")
+            except Exception:
+                opt_text = ""
+            side = (o.get("order_type") or "").replace("buy_", "")
+            out.append({
+                "id": o["id"],
+                "created_at": o.get("created_at", ""),
+                "user_chat_id": o.get("user_chat_id"),
+                "side": side,
+                "amount": float(o.get("amount", 0)),
+                "shares": float(o.get("shares", 0)),
+                "price": float(o.get("price", 0)),
+                "market_id": o.get("market_id"),
+                "event_uuid": m["event_uuid"],
+                "event_name": ev.get("name", ""),
+                "option_index": opt_idx,
+                "option_text": opt_text,
+                "current_yes_price": yes_p,
+                "current_no_price": no_p,
+            })
+        return out
+
+    def get_all_positions(self, limit: int = 500) -> List[Dict[str, Any]]:
+        shares = (
+            self.client.table("user_shares")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        ).data or []
+        if not shares:
+            return []
+
+        market_ids = sorted({s["market_id"] for s in shares if s.get("market_id") is not None})
+        markets = {}
+        if market_ids:
+            mdata = (
+                self.client.table("prediction_markets")
+                .select("*")
+                .in_("id", market_ids)
+                .execute()
+            ).data or []
+            for m in mdata:
+                markets[m["id"]] = m
+
+        event_uuids = sorted({markets[s["market_id"]]["event_uuid"] for s in shares if s["market_id"] in markets})
+        events = {}
+        if event_uuids:
+            edata = (
+                self.client.table("events")
+                .select("*")
+                .in_("event_uuid", event_uuids)
+                .execute()
+            ).data or []
+            for e in edata:
+                events[e["event_uuid"]] = e
+
+        out = []
+        for s in shares:
+            mid = s["market_id"]
+            m = markets.get(mid)
+            if not m:
+                continue
+            ev = events.get(m["event_uuid"], {})
+            yes_p, no_p = self._prices_from_row(m)
+            opts = ev.get("options") or []
+            opt_idx = m.get("option_index", 0)
+            opt_text = ""
+            try:
+                opt_text = (opts[opt_idx] or {}).get("text", "")
+            except Exception:
+                opt_text = ""
+            out.append({
+                "user_chat_id": s.get("user_chat_id"),
+                "market_id": mid,
+                "event_uuid": m["event_uuid"],
+                "event_name": ev.get("name", ""),
+                "option_index": opt_idx,
+                "option_text": opt_text,
+                "share_type": s["share_type"],
+                "quantity": float(s["quantity"]),
+                "average_price": float(s["average_price"]),
+                "current_yes_price": yes_p,
+                "current_no_price": no_p,
+            })
+        return out
 
 
 db = DB()
