@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 import requests
-from flask import Flask, request, render_template_string, jsonify, Response
+from flask import Flask, request, render_template_string, jsonify, Response, stream_with_context
 from functools import wraps
 
 from database import db
@@ -166,7 +166,6 @@ def telegram_webhook():
             send_message(chat_id, f"Ваш текущий баланс: {balance} кредитов")
 
     elif text == "/app":
-        # Прокинем chat_id и подпись + cache-buster, чтобы избежать кэша WebApp
         sig = make_sig(chat_id)
         ts = int(time.time())
         web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&v={ts}"
@@ -186,7 +185,6 @@ def telegram_webhook():
             send_message(chat_id, "Команда не распознана.")
 
     else:
-        # Текст без / — трактуем как логин для регистрации
         if is_approved:
             send_message(chat_id, "✅ Вы уже зарегистрированы! Используйте доступные команды.")
         else:
@@ -205,7 +203,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ---------------- Mini App (баланс сверху, вероятность ДА, кнопки «Да/Нет») ----------------
+# ---------------- Mini App (аватар/инициалы, баланс, вероятность ДА, кнопки «Да/Нет», выплата) ----------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -225,29 +223,48 @@ MINI_APP_HTML = """
     .actions { display:flex; gap: 8px; align-items: stretch; height: 100%; }
     .actions .btn { height: 100%; display:flex; align-items:center; justify-content:center; }
     .muted { color: #666; font-size: 14px; }
-    .section { margin: 16px 0; }
+    .section { margin: 20px 0; }
     .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; }
     .section-title { font-weight:600; }
     .caret { transition: transform .15s ease; }
     .collapsed .caret { transform: rotate(-90deg); }
     .section-body { padding:10px 0 0 0; }
-    .prob { color:#000; font-weight:700; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
-    .balance { text-align:center; font-weight:800; font-size:22px; margin: 6px 0 10px; }
+    .prob { color:#000; font-weight:800; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
+    .topbar { display:flex; justify-content:center; align-items:center; flex-direction:column; }
+    .avatar-wrap { position: relative; width: 86px; height: 86px; }
+    .avatar { width: 86px; height: 86px; border-radius: 50%; border: 2px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+    .avatar.img { position:absolute; inset:0; object-fit: cover; display:none; }
+    .avatar.ph  { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:28px; color:#fff;
+                  background: radial-gradient(circle at 30% 30%, #6a5acd, #00bcd4); letter-spacing: 1px; text-transform: uppercase; }
+    .balance { text-align:center; font-weight:900; font-size:22px; margin: 10px 0 18px; }
     /* modal */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
     .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
     .modal h3 { margin:0 0 8px 0; }
     .modal .row { justify-content: flex-start; }
     input[type=number] { padding:8px; width: 140px; }
+    /* active bets (casino-like payout on right) */
+    .bet { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .bet-info { flex: 1 1 auto; }
+    .bet-win { flex: 0 0 auto; text-align:right; }
+    .win-val { font-size:22px; font-weight:900; color:#0b8457; line-height:1.1; }
+    .win-sub { font-size:12px; color:#666; }
+    .unit { font-size:12px; font-weight:700; color:#444; margin-left:2px; }
   </style>
 </head>
 <body>
 
-  <!-- Баланс пользователя -->
+  <!-- Аватар/инициалы и баланс -->
+  <div class="topbar">
+    <div class="avatar-wrap">
+      <div id="avatarPH" class="avatar ph">U</div>
+      <img id="avatar" class="avatar img" alt="avatar">
+    </div>
+  </div>
   <div id="balance" class="balance">Баланс: —</div>
 
   <!-- Активные ставки -->
-  <div id="wrap-active" class="section">
+  <div id="wrap-active" class="section" style="margin-top:22px;">
     <div id="head-active" class="section-head" onclick="toggleSection('active')">
       <span class="section-title">Активные ставки</span>
       <span id="caret-active" class="caret">▾</span>
@@ -330,6 +347,43 @@ MINI_APP_HTML = """
       return null;
     }
 
+    function getInitials() {
+      try {
+        const u = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
+        let s = "";
+        if (u) {
+          if (u.first_name) s += u.first_name[0];
+          if (u.last_name)  s += u.last_name[0];
+          if (!s && u.username) s = u.username.slice(0, 2);
+        }
+        if (!s) s = "U";
+        return s.toUpperCase();
+      } catch(e) { return "U"; }
+    }
+
+    function setAvatar() {
+      const ph = document.getElementById('avatarPH');
+      const img = document.getElementById('avatar');
+      ph.textContent = getInitials();
+      const tryImg = (src) => {
+        if (!src) return false;
+        img.onload = () => { img.style.display = 'block'; ph.style.display = 'none'; };
+        img.onerror = () => { img.style.display = 'none'; ph.style.display = 'flex'; };
+        img.src = src;
+        return true;
+      };
+      // 1) Telegram photo_url
+      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.photo_url) {
+        if (tryImg(tg.initDataUnsafe.user.photo_url)) return;
+      }
+      // 2) Через сервер (Bot API)
+      const cid = getChatId();
+      if (cid) {
+        const url = `/api/userpic?chat_id=${cid}` + (SIG ? `&sig=${SIG}` : "");
+        tryImg(url);
+      }
+    }
+
     // --- Секции: сворачивание/разворачивание с запоминанием ---
     function toggleSection(name) {
       const body = document.getElementById("section-" + name);
@@ -367,7 +421,7 @@ MINI_APP_HTML = """
       });
     }
 
-    // --- Баланс + активные позиции ---
+    // --- Баланс и активные позиции ---
     async function fetchMe() {
       const cid = getChatId();
       const activeDiv = document.getElementById("active");
@@ -411,14 +465,25 @@ MINI_APP_HTML = """
       }
 
       data.positions.forEach(pos => {
+        const qty = +pos.quantity;
+        const avg = +pos.average_price;
+        const payout = qty;                       // макс. выплата при благоприятном исходе
         const el = document.createElement("div");
         el.className = "card";
         el.innerHTML = `
-          <div><b>${pos.event_name}</b></div>
-          <div class="muted">${pos.option_text}</div>
-          <div class="muted">Сторона: ${pos.share_type.toUpperCase()}</div>
-          <div>Кол-во: ${(+pos.quantity).toFixed(4)} | Ср. цена: ${(+pos.average_price).toFixed(4)}</div>
-          <div class="muted">Тек. цена ДА/НЕТ: ${(+pos.current_yes_price).toFixed(3)} / ${(+pos.current_no_price).toFixed(3)}</div>
+          <div class="bet">
+            <div class="bet-info">
+              <div><b>${pos.event_name}</b></div>
+              <div class="muted">${pos.option_text}</div>
+              <div class="muted">Сторона: ${pos.share_type.toUpperCase()}</div>
+              <div>Кол-во: ${qty.toFixed(4)} | Ср. цена: ${avg.toFixed(4)}</div>
+              <div class="muted">Тек. цена ДА/НЕТ: ${(+pos.current_yes_price).toFixed(3)} / ${(+pos.current_no_price).toFixed(3)}</div>
+            </div>
+            <div class="bet-win">
+              <div class="win-val">${payout.toFixed(2)} <span class="unit">кред.</span></div>
+              <div class="win-sub">возможная выплата</div>
+            </div>
+          </div>
         `;
         div.appendChild(el);
       });
@@ -514,6 +579,7 @@ MINI_APP_HTML = """
 
     // Инициализация
     applySavedCollapses();
+    setAvatar();
     fetchMe();
   </script>
 </body>
@@ -540,7 +606,7 @@ def mini_app():
     return render_template_string(MINI_APP_HTML, events=enriched, enumerate=enumerate)
 
 
-# --------- API ---------
+# --------- API: профиль, покупка, аватар ---------
 @app.get("/api/me")
 def api_me():
     try:
@@ -598,6 +664,49 @@ def api_market_buy():
         "yes_reserve": result["yes_reserve"],
         "no_reserve": result["no_reserve"],
     })
+
+
+@app.get("/api/userpic")
+def api_userpic():
+    # Проксирование аватарки через Bot API (чтобы не светить токен в клиенте)
+    try:
+        chat_id = int(request.args.get("chat_id", "0"))
+    except Exception:
+        return "bad_chat_id", 400
+
+    sig = request.args.get("sig", "")
+    if not verify_sig(chat_id, sig):
+        return "bad_sig", 403
+
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/getUserProfilePhotos"
+        r = requests.get(url, params={"user_id": chat_id, "limit": 1}, timeout=10)
+        data = r.json()
+        photos = (data or {}).get("result", {}).get("photos", [])
+        if not photos:
+            return Response(status=204)  # нет аватарки
+
+        sizes = photos[0] or []
+        if not sizes:
+            return Response(status=204)
+        file_id = sizes[-1]["file_id"]
+
+        r2 = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile", params={"file_id": file_id}, timeout=10)
+        fp = r2.json().get("result", {}).get("file_path")
+        if not fp:
+            return Response(status=204)
+
+        furl = f"https://api.telegram.org/file/bot{TOKEN}/{fp}"
+        fr = requests.get(furl, timeout=10, stream=True)
+
+        headers = {
+            "Content-Type": fr.headers.get("Content-Type", "image/jpeg"),
+            "Cache-Control": "public, max-age=3600",
+        }
+        return Response(stream_with_context(fr.iter_content(chunk_size=4096)), headers=headers, status=200)
+    except Exception as e:
+        print(f"[userpic] error: {e}")
+        return Response(status=204)
 
 
 # ---------------- Admin panel ----------------
