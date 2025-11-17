@@ -146,7 +146,7 @@ def telegram_webhook():
                     send_message(chat_id, "Сервис временно недоступен. Повторите позже.")
                     return "ok"
                 web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]]}
+                kb = { "inline_keyboard": [ [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}] ] }
                 send_message(chat_id, "Приложение готово. Открывайте:", kb)
             elif status == "pending":
                 send_message(chat_id, "⏳ Ваша заявка на регистрацию ожидает проверки администратором.")
@@ -939,7 +939,7 @@ def admin_approve(chat_id: int):
         sig = make_sig(chat_id)
         if sig:
             web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-            kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]]}
+            kb = { "inline_keyboard": [ [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}] ] }
             send_message(chat_id, "✅ Ваша регистрация подтверждена! Добро пожаловать.", kb)
         return jsonify(success=True)
     return jsonify(success=False), 404
@@ -984,3 +984,4 @@ def admin_unban(chat_id: int):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
