@@ -13,14 +13,25 @@ def _now() -> str:
 
 
 def _monday_of_week_utc(dt: datetime) -> date:
-    # Неделя: понедельник 00:00:00Z — воскресенье 23:59:59
     d = dt.date()
     delta = timedelta(days=d.isoweekday() - 1)  # Mon=1..Sun=7
     return d - delta
 
 
-def _format_range_label(start: date) -> str:
-    end = start + timedelta(days=6)
+def _month_start_utc(dt: datetime) -> date:
+    d = dt.date()
+    return date(d.year, d.month, 1)
+
+
+def _month_end_from_start(start: date) -> date:
+    if start.month == 12:
+        next_start = date(start.year + 1, 1, 1)
+    else:
+        next_start = date(start.year, start.month + 1, 1)
+    return next_start - timedelta(days=1)
+
+
+def _format_range_label(start: date, end: date) -> str:
     def fmt(d: date) -> str:
         return d.strftime("%d.%m.%y")
     return f"{fmt(start)}-{fmt(end)}"
@@ -128,7 +139,6 @@ class DB:
 
     # ---------- Trade ----------
     def trade_buy(self, *, chat_id: int, event_uuid: str, option_index: int, side: str, amount: float):
-        # 1) Пользователь и баланс
         u = self.get_user(chat_id)
         if not u:
             return None, "user_not_found"
@@ -137,7 +147,6 @@ class DB:
         if float(u.get("balance", 0)) < float(amount):
             return None, "insufficient_funds"
 
-        # 2) Рынок
         row = self.get_market(event_uuid, option_index)
         if not row:
             row = self.create_prediction_market(event_uuid, option_index)
@@ -170,7 +179,6 @@ class DB:
 
         trade_price = float(Decimal(str(amount)) / shares)
 
-        # 3) Обновляем рынок
         upd = (
             self.client.table("prediction_markets")
             .update(
@@ -185,11 +193,9 @@ class DB:
         )
         market = upd.data[0] if upd.data else row
 
-        # 4) Списываем баланс
         new_balance = int(u.get("balance", 0)) - int(float(amount))
         self.client.table("users").update({"balance": new_balance}).eq("chat_id", chat_id).execute()
 
-        # 5) user_shares upsert
         existing = (
             self.client.table("user_shares")
             .select("*")
@@ -219,7 +225,6 @@ class DB:
                 "created_at": _now(),
             }).execute()
 
-        # 6) Ордер
         yes_p, no_p = self._prices_from_row(market)
         self.client.table("market_orders").insert({
             "user_chat_id": chat_id,
@@ -314,7 +319,6 @@ class DB:
         return out
 
     def _current_equities_all(self) -> Dict[int, float]:
-        # equity = balance + sum(q * EV), где EV для YES = P(YES), для NO = 1 - P(YES)
         users = self.get_approved_users()
         balances = {u["chat_id"]: float(u.get("balance", 0)) for u in users}
 
@@ -347,7 +351,7 @@ class DB:
             m = markets.get(mid)
             if not m:
                 continue
-            yes_p, _no_p = self._prices_from_row(m)
+            yes_p, _ = self._prices_from_row(m)
             ev_per_share = Decimal(str(yes_p if side == "yes" else (1 - yes_p)))
             ev_sum[cid] = ev_sum.get(cid, Decimal("0")) + q * ev_per_share
 
@@ -361,7 +365,7 @@ class DB:
         now = datetime.now(timezone.utc)
         start = _monday_of_week_utc(now)
         end = start + timedelta(days=6)
-        return {"start": start.isoformat(), "end": end.isoformat(), "label": _format_range_label(start)}
+        return {"start": start.isoformat(), "end": end.isoformat(), "label": _format_range_label(start, end)}
 
     def _get_existing_baselines(self, week_start_iso: str) -> Dict[int, float]:
         rows = (
@@ -385,11 +389,58 @@ class DB:
         if to_add:
             self.client.table("weekly_baselines").insert(to_add).execute()
 
-    def get_leaderboard(self, week_start_iso: str, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_leaderboard_week(self, week_start_iso: str, limit: int = 50) -> List[Dict[str, Any]]:
         equities = self._current_equities_all()
         existing = self._get_existing_baselines(week_start_iso)
         self._insert_missing_baselines(week_start_iso, equities, existing)
         baselines = self._get_existing_baselines(week_start_iso)
+
+        users = self.get_approved_users()
+        u_login = {u["chat_id"]: u.get("login", "") for u in users}
+
+        items = []
+        for cid, cur_eq in equities.items():
+            base = baselines.get(cid, cur_eq)
+            earned = cur_eq - base
+            items.append({"chat_id": cid, "login": u_login.get(cid, ""), "earned": float(earned)})
+
+        items.sort(key=lambda x: x["earned"], reverse=True)
+        return items[:limit]
+
+    # ---------- Monthly baselines / Leaderboard ----------
+    def month_current_bounds(self) -> Dict[str, str]:
+        now = datetime.now(timezone.utc)
+        start = _month_start_utc(now)
+        end = _month_end_from_start(start)
+        return {"start": start.isoformat(), "end": end.isoformat(), "label": _format_range_label(start, end)}
+
+    def _get_existing_month_baselines(self, month_start_iso: str) -> Dict[int, float]:
+        rows = (
+            self.client.table("monthly_baselines")
+            .select("user_chat_id,equity")
+            .eq("month_start", month_start_iso)
+            .execute()
+        ).data or []
+        return {r["user_chat_id"]: float(r["equity"]) for r in rows}
+
+    def _insert_missing_month_baselines(self, month_start_iso: str, equities: Dict[int, float], existing: Dict[int, float]):
+        to_add = []
+        for cid, eq in equities.items():
+            if cid not in existing:
+                to_add.append({
+                    "user_chat_id": cid,
+                    "month_start": month_start_iso,
+                    "equity": float(eq),
+                    "created_at": _now(),
+                })
+        if to_add:
+            self.client.table("monthly_baselines").insert(to_add).execute()
+
+    def get_leaderboard_month(self, month_start_iso: str, limit: int = 50) -> List[Dict[str, Any]]:
+        equities = self._current_equities_all()
+        existing = self._get_existing_month_baselines(month_start_iso)
+        self._insert_missing_month_baselines(month_start_iso, equities, existing)
+        baselines = self._get_existing_month_baselines(month_start_iso)
 
         users = self.get_approved_users()
         u_login = {u["chat_id"]: u.get("login", "") for u in users}
