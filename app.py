@@ -3,6 +3,7 @@ import json
 import uuid
 import hmac
 import hashlib
+import time
 from datetime import datetime
 
 import requests
@@ -21,7 +22,7 @@ TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "change-me")
 ADMIN_BASIC_USER = os.getenv("ADMIN_BASIC_USER", "admin")
 ADMIN_BASIC_PASS = os.getenv("ADMIN_BASIC_PASS", "admin")
 
-WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # опционально, но рекомендуется
+WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # опционально, для подписи chat_id
 
 
 # ---------------- Admin auth ----------------
@@ -165,9 +166,10 @@ def telegram_webhook():
             send_message(chat_id, f"Ваш текущий баланс: {balance} кредитов")
 
     elif text == "/app":
-        # Добавим chat_id и подпись в URL, чтобы мини‑апп всегда знало пользователя
+        # Прокинем chat_id и подпись + cache-buster, чтобы избежать кэша WebApp
         sig = make_sig(chat_id)
-        web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}"
+        ts = int(time.time())
+        web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&v={ts}"
         if sig:
             web_app_url += f"&sig={sig}"
         kb = {
@@ -271,8 +273,17 @@ MINI_APP_HTML = """
                     <small>Цена ДА: {{ '%.3f' % md.yes_price }} | НЕТ: {{ '%.3f' % md.no_price }}</small>
                   </div>
                   <div>
-                    <button class="btn yes" onclick='openBuy("{{ e.event_uuid }}", {{ idx }}, "yes", {{ opt.text|tojson }})'>Купить ДА</button>
-                    <button class="btn no" onclick='openBuy("{{ e.event_uuid }}", {{ idx }}, "no", {{ opt.text|tojson }})'>Купить НЕТ</button>
+                    <button class="btn yes buy-btn"
+                            data-event="{{ e.event_uuid }}"
+                            data-index="{{ idx }}"
+                            data-side="yes"
+                            data-text="{{ opt.text|e }}">Купить ДА</button>
+
+                    <button class="btn no buy-btn"
+                            data-event="{{ e.event_uuid }}"
+                            data-index="{{ idx }}"
+                            data-side="no"
+                            data-text="{{ opt.text|e }}">Купить НЕТ</button>
                   </div>
                 </div>
               </div>
@@ -474,6 +485,22 @@ MINI_APP_HTML = """
         alert("Сетевая ошибка");
       }
     }
+
+    // Делегирование кликов по кнопкам покупки (надёжнее, чем inline onclick)
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.buy-btn');
+      if (!btn) return;
+      const event_uuid = btn.dataset.event;
+      const option_index = parseInt(btn.dataset.index, 10);
+      const side = btn.dataset.side;
+      const optText = btn.dataset.text || '';
+      openBuy(event_uuid, option_index, side, optText);
+    });
+
+    // Экспорт функций (на всякий)
+    window.openBuy = openBuy;
+    window.confirmBuy = confirmBuy;
+    window.closeBuy = closeBuy;
 
     // Инициализация
     applySavedCollapses();
@@ -740,7 +767,7 @@ def publish_event():
     return Response("Ошибка при создании события", 500)
 
 
-# -------- Admin: orders & positions (без префикса «Вариант N:») --------
+# -------- Admin: orders & positions --------
 @app.get("/admin/orders")
 @requires_auth
 def admin_orders():
@@ -784,4 +811,3 @@ def admin_positions():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
-
