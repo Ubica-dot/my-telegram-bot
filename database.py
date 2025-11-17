@@ -50,8 +50,16 @@ class DB:
         res = self.client.table("users").select("*").eq("chat_id", chat_id).limit(1).execute()
         return res.data[0] if res.data else None
 
+    def get_pending_users(self) -> List[Dict[str, Any]]:
+        res = self.client.table("users").select("*").eq("status", "pending").order("created_at", desc=True).execute()
+        return res.data or []
+
     def get_approved_users(self) -> List[Dict[str, Any]]:
-        res = self.client.table("users").select("chat_id,login,balance,status").eq("status", "approved").execute()
+        res = self.client.table("users").select("*").eq("status", "approved").order("approved_at", desc=True).execute()
+        return res.data or []
+
+    def get_banned_users(self) -> List[Dict[str, Any]]:
+        res = self.client.table("users").select("*").eq("status", "banned").order("updated_at", desc=True).execute()
         return res.data or []
 
     def create_user(self, chat_id: int, login: str, username: str) -> Optional[Dict[str, Any]]:
@@ -66,21 +74,35 @@ class DB:
         res = self.client.table("users").insert(row).execute()
         return res.data[0] if res.data else None
 
-    def get_pending_users(self) -> List[Dict[str, Any]]:
-        res = self.client.table("users").select("*").eq("status", "pending").order("created_at", desc=True).execute()
-        return res.data or []
-
     def approve_user(self, chat_id: int) -> Optional[Dict[str, Any]]:
         res = (
             self.client.table("users")
-            .update({"status": "approved", "approved_at": _now()})
+            .update({"status": "approved", "approved_at": _now(), "updated_at": _now()})
             .eq("chat_id", chat_id)
             .execute()
         )
         return res.data[0] if res.data else None
 
+    def reject_user(self, chat_id: int) -> bool:
+        # Полностью удалять или оставлять? Оставим запись (история), просто пометим rejected.
+        res = (
+            self.client.table("users")
+            .update({"status": "rejected", "updated_at": _now()})
+            .eq("chat_id", chat_id)
+            .execute()
+        )
+        return bool(res.data)
+
+    def ban_user(self, chat_id: int) -> Optional[Dict[str, Any]]:
+        res = self.client.table("users").update({"status": "banned", "updated_at": _now()}).eq("chat_id", chat_id).execute()
+        return res.data[0] if res.data else None
+
+    def unban_user(self, chat_id: int) -> Optional[Dict[str, Any]]:
+        # Возвращаем в approved
+        return self.approve_user(chat_id)
+
     def update_user_balance(self, chat_id: int, new_balance: int) -> Optional[Dict[str, Any]]:
-        res = self.client.table("users").update({"balance": new_balance}).eq("chat_id", chat_id).execute()
+        res = self.client.table("users").update({"balance": new_balance, "updated_at": _now()}).eq("chat_id", chat_id).execute()
         return res.data[0] if res.data else None
 
     # ---------- Events ----------
@@ -89,9 +111,7 @@ class DB:
         return res.data[0] if res.data else None
 
     def get_published_events(self) -> List[Dict[str, Any]]:
-        res = (
-            self.client.table("events").select("*").eq("is_published", True).order("end_date", desc=False).execute()
-        )
+        res = self.client.table("events").select("*").eq("is_published", True).order("end_date", desc=False).execute()
         return res.data or []
 
     # ---------- Markets ----------
@@ -133,7 +153,7 @@ class DB:
         total = y + n
         if total == 0:
             return 0.5, 0.5
-        yes_p = float(n / total)   # цена YES = доля противоположного резерва
+        yes_p = float(n / total)
         no_p = float(y / total)
         return yes_p, no_p
 
@@ -151,10 +171,11 @@ class DB:
         if not row:
             row = self.create_prediction_market(event_uuid, option_index)
 
-        y = Decimal(str(row["total_yes_reserve"]))
-        n = Decimal(str(row["total_no_reserve"]))
+        from decimal import Decimal as D
+        y = D(str(row["total_yes_reserve"]))
+        n = D(str(row["total_no_reserve"]))
         k = y * n
-        amt = Decimal(str(amount))
+        amt = D(str(amount))
 
         if side not in ("yes", "no"):
             return None, "bad_side"
@@ -177,7 +198,7 @@ class DB:
         if shares <= 0:
             return None, "zero_shares"
 
-        trade_price = float(Decimal(str(amount)) / shares)
+        trade_price = float(amt / shares)
 
         upd = (
             self.client.table("prediction_markets")
@@ -194,7 +215,7 @@ class DB:
         market = upd.data[0] if upd.data else row
 
         new_balance = int(u.get("balance", 0)) - int(float(amount))
-        self.client.table("users").update({"balance": new_balance}).eq("chat_id", chat_id).execute()
+        self.client.table("users").update({"balance": new_balance, "updated_at": _now()}).eq("chat_id", chat_id).execute()
 
         existing = (
             self.client.table("user_shares")
@@ -207,10 +228,10 @@ class DB:
         )
         if existing.data:
             us = existing.data[0]
-            old_q = Decimal(str(us["quantity"]))
-            old_avg = Decimal(str(us["average_price"]))
+            old_q = D(str(us["quantity"]))
+            old_avg = D(str(us["average_price"]))
             new_q = old_q + shares
-            new_avg = (old_q * old_avg + Decimal(str(amount))) / new_q
+            new_avg = (old_q * old_avg + D(str(amount))) / new_q
             self.client.table("user_shares").update({
                 "quantity": float(new_q),
                 "average_price": float(new_avg),
@@ -221,7 +242,7 @@ class DB:
                 "market_id": row["id"],
                 "share_type": side,
                 "quantity": float(shares),
-                "average_price": float(Decimal(str(amount)) / shares),
+                "average_price": float(amt / shares),
                 "created_at": _now(),
             }).execute()
 
@@ -342,29 +363,36 @@ class DB:
             for m in mdata:
                 markets[m["id"]] = m
 
-        ev_sum: Dict[int, Decimal] = {cid: Decimal("0") for cid in balances.keys()}
+        from decimal import Decimal as D
+        ev_sum: Dict[int, D] = {cid: D("0") for cid in balances.keys()}
         for s in shares:
             cid = s["user_chat_id"]
             mid = s["market_id"]
             side = s["share_type"]
-            q = Decimal(str(s["quantity"]))
+            q = D(str(s["quantity"]))
             m = markets.get(mid)
             if not m:
                 continue
             yes_p, _ = self._prices_from_row(m)
-            ev_per_share = Decimal(str(yes_p if side == "yes" else (1 - yes_p)))
-            ev_sum[cid] = ev_sum.get(cid, Decimal("0")) + q * ev_per_share
+            ev_per_share = D(str(yes_p if side == "yes" else (1 - yes_p)))
+            ev_sum[cid] = ev_sum.get(cid, D("0")) + q * ev_per_share
 
         equities = {}
         for cid, bal in balances.items():
-            equities[cid] = float(Decimal(str(bal)) + ev_sum.get(cid, Decimal("0")))
+            equities[cid] = float(D(str(bal)) + ev_sum.get(cid, D("0")))
         return equities
 
-    # ---------- Weekly baselines / Leaderboard ----------
+    # ---------- Weekly / Monthly Leaderboards ----------
     def week_current_bounds(self) -> Dict[str, str]:
         now = datetime.now(timezone.utc)
         start = _monday_of_week_utc(now)
         end = start + timedelta(days=6)
+        return {"start": start.isoformat(), "end": end.isoformat(), "label": _format_range_label(start, end)}
+
+    def month_current_bounds(self) -> Dict[str, str]:
+        now = datetime.now(timezone.utc)
+        start = _month_start_utc(now)
+        end = _month_end_from_start(start)
         return {"start": start.isoformat(), "end": end.isoformat(), "label": _format_range_label(start, end)}
 
     def _get_existing_baselines(self, week_start_iso: str) -> Dict[int, float]:
@@ -406,13 +434,6 @@ class DB:
 
         items.sort(key=lambda x: x["earned"], reverse=True)
         return items[:limit]
-
-    # ---------- Monthly baselines / Leaderboard ----------
-    def month_current_bounds(self) -> Dict[str, str]:
-        now = datetime.now(timezone.utc)
-        start = _month_start_utc(now)
-        end = _month_end_from_start(start)
-        return {"start": start.isoformat(), "end": end.isoformat(), "label": _format_range_label(start, end)}
 
     def _get_existing_month_baselines(self, month_start_iso: str) -> Dict[int, float]:
         rows = (
