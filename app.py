@@ -720,7 +720,7 @@ def api_me():
     u = db.get_user(chat_id)
     if not u:
         return jsonify(success=False, error="user_not_found"), 404
-    if u.get("status") != "approved"):
+    if u.get("status") != "approved":
         return jsonify(success=False, error="not_approved"), 403
     positions = db.get_user_positions(chat_id)
     return jsonify(success=True, user={"chat_id": chat_id, "balance": u.get("balance", 0)}, positions=positions)
@@ -810,3 +810,4 @@ def api_leaderboard():
         bounds = db.week_current_bounds()
         items = db.get_leaderboard_week(bounds["start"], limit=50)
     return jsonify(success=True, week=bounds, items=items)
+
