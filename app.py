@@ -532,7 +532,7 @@ MINI_APP_HTML = """
       });
     }
 
-    // Hover: подмена текста на вероятность
+    // hover-текст на кнопках
     document.addEventListener('mouseenter', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
@@ -548,7 +548,7 @@ MINI_APP_HTML = """
       btn.textContent = label;
     }, true);
 
-    // ---- Лидеры (неделя/месяц) ----
+    // ---- лидеры неделя/месяц ----
     let currentPeriod = 'week';
     function bindSeg() {
       const seg = document.getElementById('seg');
@@ -660,14 +660,13 @@ MINI_APP_HTML = """
 
     window.openBuy = openBuy; window.confirmBuy = confirmBuy; window.closeBuy = closeBuy;
 
-    // Инициализация
     (function init(){
       if (tg) tg.ready();
       applySavedCollapses();
       setAvatar();
       fetchMe();
       bindSeg();
-      // Лидеров грузим при первом раскрытии
+      // лидеры грузим при первом раскрытии
     })();
   </script>
 </body>
@@ -811,3 +810,6 @@ def api_leaderboard():
         items = db.get_leaderboard_week(bounds["start"], limit=50)
     return jsonify(success=True, week=bounds, items=items)
 
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
