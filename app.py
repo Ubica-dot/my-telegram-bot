@@ -22,10 +22,9 @@ TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "change-me")
 ADMIN_BASIC_USER = os.getenv("ADMIN_BASIC_USER", "admin")
 ADMIN_BASIC_PASS = os.getenv("ADMIN_BASIC_PASS", "admin")
 
-WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # подпись chat_id для mini-app
+WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")
 
 
-# ------------- Admin auth -------------
 def _check_auth(u, p):
     return u == ADMIN_BASIC_USER and p == ADMIN_BASIC_PASS
 
@@ -44,7 +43,6 @@ def requires_auth(fn):
     return wrapper
 
 
-# ------------- Utils -------------
 def send_message(chat_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
@@ -98,7 +96,6 @@ def verify_sig(chat_id: int, sig: str) -> bool:
     return hmac.compare_digest(make_sig(chat_id), sig or "")
 
 
-# ------------- Health -------------
 @app.get("/health")
 def health():
     return jsonify(ok=True)
@@ -109,7 +106,6 @@ def index():
     return "OK"
 
 
-# ------------- Telegram webhook -------------
 @app.post("/webhook")
 def telegram_webhook():
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
@@ -195,7 +191,6 @@ def telegram_webhook():
     return "ok"
 
 
-# ------------- Mini App -------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -209,9 +204,8 @@ MINI_APP_HTML = """
     .opt  { padding: 10px; border: 1px dashed #ccc; border-radius: 10px; margin: 6px 0;
             display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: stretch; }
     .opt-title { display:flex; align-items:center; font-weight: 700; }
-    .btn  { padding: 8px 12px; border: 0; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 700;
-            transition: background-color .18s ease, color .18s ease; }
-    /* Мягкие фоны (без alpha). На hover — насыщенный фон, текст — бледный в тон исходному фону */
+    .btn  { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-size: 15px; font-weight: 700;
+            transition: background-color .18s ease, color .18s ease; min-width: 92px; min-height: 42px; }
     .yes  { background: #CDEAD2; color: #2e7d32; }
     .no   { background: #F3C7C7; color: #c62828; }
     .yes:hover { background: #2e7d32; color: #CDEAD2; }
@@ -219,8 +213,8 @@ MINI_APP_HTML = """
     .actions { display:flex; gap: 8px; align-items: stretch; height: 100%; }
     .actions .btn { height: 100%; display:flex; align-items:center; justify-content:center; }
     .muted { color: #666; font-size: 14px; }
-    .meta { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:12px; color:#666; }
-    .meta-right { margin-left:auto; text-align:right; flex:0 0 auto; }
+    .meta-left { grid-column: 1; font-size: 12px; color: #666; margin-top: 6px; }
+    .meta-right { grid-column: 3; justify-self: end; font-size: 12px; color: #666; margin-top: 6px; }
     .section { margin: 20px 0; }
     .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; }
     .section-title { font-weight:600; }
@@ -251,7 +245,10 @@ MINI_APP_HTML = """
     .unit { font-size:12px; font-weight:700; color:#444; margin-left:2px; }
     /* leaderboard */
     .lb-head { text-align:center; font-weight:700; margin:6px 0 10px; }
-    .lb-table { width:100%; border-collapse: collapse; }
+    .seg { display:inline-flex; background:#f0f0f0; border-radius:999px; padding:4px; gap:4px; }
+    .seg-btn { border:0; background:transparent; padding:6px 12px; border-radius:999px; font-weight:700; cursor:pointer; color:#444; transition:all .15s ease; }
+    .seg-btn.active { background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.08); color:#111; }
+    .lb-table { width:100%; }
     .lb-row { display:grid; grid-template-columns: 32px 40px 1fr auto; align-items:center; padding:8px 6px; border-bottom:1px solid #eee; gap:8px; }
     .lb-rank { text-align:center; font-weight:800; color:#444; }
     .lb-ava { width:32px; height:32px; border-radius:50%; object-fit:cover; }
@@ -316,17 +313,15 @@ MINI_APP_HTML = """
                           data-prob="{{ no_pct }}"
                           data-text="{{ opt.text|e }}">НЕТ</button>
                 </div>
-                <div class="meta">
-                  <div>
-                    {% set vol = (md.volume or 0) | int %}
-                    {% if vol >= 1000 %}
-                      {{ (vol // 1000) | int }} тыс. кредитов
-                    {% else %}
-                      {{ vol }} кредитов
-                    {% endif %}
-                  </div>
-                  <div class="meta-right">До {{ md.end_short }}</div>
+                <div class="meta-left">
+                  {% set vol = (md.volume or 0) | int %}
+                  {% if vol >= 1000 %}
+                    {{ (vol // 1000) | int }} тыс. кредитов
+                  {% else %}
+                    {{ vol }} кредитов
+                  {% endif %}
                 </div>
+                <div class="meta-right">До {{ md.end_short }}</div>
               </div>
             {% endfor %}
           </div>
@@ -335,14 +330,22 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Таблица лидеров (свернута по умолчанию) -->
+  <!-- Таблица лидеров -->
   <div id="wrap-leaders" class="section">
     <div id="head-leaders" class="section-head" onclick="toggleLeaders()">
       <span class="section-title">Таблица лидеров</span>
       <span id="caret-leaders" class="caret">▸</span>
     </div>
     <div id="section-leaders" class="section-body" style="display:none;">
-      <div id="lb-range" class="lb-head">—</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin:6px 0 10px;">
+        <div id="lb-range" class="lb-head" style="margin:0; flex:1; text-align:center;">—</div>
+      </div>
+      <div style="display:flex; justify-content:center; margin-bottom:8px;">
+        <div class="seg" id="seg">
+          <button class="seg-btn active" data-period="week">Неделя</button>
+          <button class="seg-btn" data-period="month">Месяц</button>
+        </div>
+      </div>
       <div id="lb-container" class="lb-table">Загрузка…</div>
     </div>
   </div>
@@ -413,7 +416,6 @@ MINI_APP_HTML = """
       }
     }
 
-    // --- Секции ---
     function toggleSection(name) {
       const body = document.getElementById("section-" + name);
       const caret = document.getElementById("caret-" + name);
@@ -443,7 +445,7 @@ MINI_APP_HTML = """
         body.style.display = "none"; caret.textContent = "▸"; head.classList.add("collapsed");
       } else {
         body.style.display = "block"; caret.textContent = "▾"; head.classList.remove("collapsed");
-        if (!toggleLeaders._loaded) { fetchLeaderboard(); toggleLeaders._loaded = true; }
+        if (!toggleLeaders._loaded) { fetchLeaderboard(currentPeriod); toggleLeaders._loaded = true; }
       }
     }
 
@@ -463,7 +465,6 @@ MINI_APP_HTML = """
       });
     }
 
-    // --- Баланс и активные позиции ---
     async function fetchMe() {
       const cid = getChatId();
       const activeDiv = document.getElementById("active");
@@ -531,7 +532,7 @@ MINI_APP_HTML = """
       });
     }
 
-    // --- Логика hover: подмена текста кнопки на вероятность ---
+    // Hover: подмена текста на вероятность
     document.addEventListener('mouseenter', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
@@ -547,12 +548,27 @@ MINI_APP_HTML = """
       btn.textContent = label;
     }, true);
 
-    // --- Лидеры ---
-    async function fetchLeaderboard() {
+    // ---- Лидеры (неделя/месяц) ----
+    let currentPeriod = 'week';
+    function bindSeg() {
+      const seg = document.getElementById('seg');
+      if (!seg) return;
+      seg.addEventListener('click', (e) => {
+        const b = e.target.closest('.seg-btn');
+        if (!b) return;
+        const period = b.dataset.period || 'week';
+        if (period === currentPeriod) return;
+        currentPeriod = period;
+        for (const x of seg.querySelectorAll('.seg-btn')) x.classList.toggle('active', x === b);
+        fetchLeaderboard(period);
+      });
+    }
+
+    async function fetchLeaderboard(period='week') {
       const cid = getChatId();
       const lb = document.getElementById("lb-container");
       try {
-        const url = "/api/leaderboard" + (cid ? `?viewer=${cid}` : "");
+        const url = "/api/leaderboard?period=" + encodeURIComponent(period) + (cid ? `&viewer=${cid}` : "");
         const r = await fetch(url);
         const data = await r.json();
         if (!r.ok || !data.success) {
@@ -563,7 +579,7 @@ MINI_APP_HTML = """
 
         const items = data.items || [];
         if (items.length === 0) {
-          lb.textContent = "Пока нет данных за текущую неделю.";
+          lb.textContent = "Пока нет данных за текущий период.";
           return;
         }
         lb.innerHTML = "";
@@ -590,9 +606,8 @@ MINI_APP_HTML = """
       }
     }
 
-    // --- Покупка ---
+    // Покупка
     let buyCtx = null;
-
     function openBuy(event_uuid, option_index, side, optText) {
       const cid = getChatId();
       if (!cid) { alert("Не удалось получить chat_id. Откройте Mini App из чата командой /app."); return; }
@@ -618,7 +633,6 @@ MINI_APP_HTML = """
         const data = await r.json();
         if (!r.ok || !data.success) { alert("Ошибка: " + (data.error || r.statusText)); return; }
 
-        // Обновим вероятность
         const card = document.querySelector(`[data-event='${buyCtx.event_uuid}'] [data-option='${buyCtx.option_index}']`);
         if (card) {
           const probEl = card.querySelector(".prob");
@@ -626,7 +640,7 @@ MINI_APP_HTML = """
         }
 
         await fetchMe();
-        if (document.getElementById("section-leaders").style.display !== "none") fetchLeaderboard();
+        if (document.getElementById("section-leaders").style.display !== "none") fetchLeaderboard(currentPeriod);
 
         closeBuy();
         if (tg && tg.showPopup) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${buyCtx.side.toUpperCase()})` });
@@ -634,7 +648,6 @@ MINI_APP_HTML = """
       } catch (e) { console.error(e); alert("Сетевая ошибка"); }
     }
 
-    // Делегирование кликов по кнопкам покупки
     document.addEventListener('click', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
@@ -653,7 +666,8 @@ MINI_APP_HTML = """
       applySavedCollapses();
       setAvatar();
       fetchMe();
-      // Лидеров загружаем при первом раскрытии
+      bindSeg();
+      // Лидеров грузим при первом раскрытии
     })();
   </script>
 </body>
@@ -687,14 +701,13 @@ def mini_app():
             no = float(m["total_no_reserve"])
             total = yes + no
             yp = (no / total) if total > 0 else 0.5
-            volume = max(0.0, total - 2000.0)  # суммарные «заведённые» кредиты в пул
+            volume = max(0.0, total - 2000.0)
             markets[m["option_index"]] = {"yes_price": yp, "volume": volume, "end_short": e["end_short"]}
         e["markets"] = markets
         enriched.append(e)
     return render_template_string(MINI_APP_HTML, events=enriched, enumerate=enumerate)
 
 
-# ------------- API: профиль, покупка, аватар, лидеры -------------
 @app.get("/api/me")
 def api_me():
     try:
@@ -707,7 +720,7 @@ def api_me():
     u = db.get_user(chat_id)
     if not u:
         return jsonify(success=False, error="user_not_found"), 404
-    if u.get("status") != "approved":
+    if u.get("status") != "approved"):
         return jsonify(success=False, error="not_approved"), 403
     positions = db.get_user_positions(chat_id)
     return jsonify(success=True, user={"chat_id": chat_id, "balance": u.get("balance", 0)}, positions=positions)
@@ -789,189 +802,11 @@ def api_userpic():
 
 @app.get("/api/leaderboard")
 def api_leaderboard():
-    week = db.week_current_bounds()  # {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "label": "DD.MM.YY-DD.MM.YY"}
-    items = db.get_leaderboard(week["start"], limit=50)
-    return jsonify(success=True, week=week, items=items)
-
-
-# ------------- Admin panel (как было) -------------
-ADMIN_PANEL_HTML = """
-<!doctype html>
-<html lang="ru">
-<head><meta charset="utf-8"><title>Админ</title></head>
-<body>
-  <h1>Админская панель бота</h1>
-
-  <h2>Заявки на регистрацию ({{ pending_count }})</h2>
-  {% for user in pending_users %}
-    <div style="margin:8px 0;padding:6px;border:1px solid #ccc;">
-      <div><b>ID:</b> {{ user.chat_id }}</div>
-      <div><b>Логин:</b> {{ user.login }}</div>
-      <div><b>Username:</b> @{{ user.username }}</div>
-      <div><b>Дата:</b> {{ (user.created_at or '')[:16] }}</div>
-      <div>
-        <form method="post" action="/admin/approve/{{ user.chat_id }}" style="display:inline;">
-          <button type="submit">✅ Одобрить</button>
-        </form>
-        <form method="post" action="/admin/reject/{{ user.chat_id }}" style="display:inline;">
-          <button type="submit">❌ Отклонить</button>
-        </form>
-      </div>
-    </div>
-  {% endfor %}
-
-  <h2>Одобренные пользователи ({{ approved_count }})</h2>
-  {% for user in approved_users %}
-    <div style="margin:8px 0;padding:6px;border:1px solid #ccc;">
-      <div><b>ID:</b> {{ user.chat_id }}</div>
-      <div><b>Логин:</b> {{ user.login }}</div>
-      <div><b>Username:</b> @{{ user.username }}</div>
-      <div><b>Баланс:</b> {{ user.balance }} кредитов</div>
-      <div><b>Одобрен:</b> {{ (user.approved_at or '')[:16] }}</div>
-      <form method="post" action="/admin/update_balance/{{ user.chat_id }}">
-        <input type="number" name="balance" min="0" step="1" value="{{ user.balance }}" />
-        <button type="submit">Обновить</button>
-      </form>
-    </div>
-  {% endfor %}
-
-  <h2>Управление мероприятиями</h2>
-  <p><a href="/admin/create_event">Создать новое мероприятие</a></p>
-
-  <h2>Торговля</h2>
-  <p><a href="/admin/orders">Последние сделки</a> · <a href="/admin/positions">Позиции пользователей</a></p>
-</body>
-</html>
-"""
-
-@app.get("/admin")
-@requires_auth
-def admin_panel():
-    pending = db.get_pending_users()
-    approved = db.get_approved_users()
-    return render_template_string(
-        ADMIN_PANEL_HTML,
-        pending_users=pending,
-        approved_users=approved,
-        pending_count=len(pending),
-        approved_count=len(approved),
-    )
-
-
-@app.post("/admin/approve/<int:chat_id>")
-@requires_auth
-def approve_user(chat_id: int):
-    user = db.approve_user(chat_id)
-    if user:
-        balance = user.get("balance", 1000)
-        send_message(chat_id, f"Поздравляем! Ваша заявка одобрена.\nВаш стартовый баланс: {balance} кредитов")
-        return jsonify(success=True)
-    return jsonify(success=False, error="Пользователь не найден"), 404
-
-
-@app.post("/admin/reject/<int:chat_id>")
-@requires_auth
-def reject_user(chat_id: int):
-    u = db.get_user(chat_id)
-    if u:
-        send_message(chat_id, "❌ К сожалению, ваша заявка отклонена. Подайте заново через /start")
-        return jsonify(success=True)
-    return jsonify(success=False, error="Пользователь не найден"), 404
-
-
-@app.post("/admin/update_balance/<int:chat_id>")
-@requires_auth
-def update_user_balance(chat_id: int):
-    if request.is_json:
-        new_balance = request.json.get("balance")
+    period = (request.args.get("period") or "week").lower()
+    if period == "month":
+        bounds = db.month_current_bounds()
+        items = db.get_leaderboard_month(bounds["start"], limit=50)
     else:
-        new_balance = request.form.get("balance", type=int)
-
-    if new_balance is None or int(new_balance) < 0:
-        return jsonify(success=False, error="Некорректная сумма"), 400
-
-    user = db.update_user_balance(chat_id, int(new_balance))
-    if user:
-        return jsonify(success=True)
-    return jsonify(success=False, error="Пользователь не найден"), 404
-
-
-@app.get("/admin/create_event")
-@requires_auth
-def create_event_form():
-    return """
-    <h3>Создание мероприятия</h3>
-    <form method="post" action="/admin/publish_event">
-      <div>Название: <input name="event_name" required></div>
-      <div>Правила и описание:<br><textarea name="event_rules" rows="6" cols="60" required></textarea></div>
-      <div>Варианты:<br>
-        <input name="option_1" placeholder="Вариант 1" required><br>
-        <input name="option_2" placeholder="Вариант 2" required><br>
-        <button type="button" onclick="addOpt()">➕ Добавить вариант</button>
-      </div>
-      <div>Дата окончания: <input type="datetime-local" name="end_date" required></div>
-      <div><button type="submit">Опубликовать</button></div>
-    </form>
-    <script>
-      function addOpt(){
-        const n = document.querySelectorAll('input[name^=option_]').length + 1;
-        const inp = document.createElement('input');
-        inp.name = 'option_' + n;
-        inp.placeholder = 'Вариант ' + n;
-        document.forms[0].insertBefore(inp, document.forms[0].children[6]);
-        document.forms[0].insertBefore(document.createElement('br'), document.forms[0].children[6]);
-      }
-    </script>
-    """
-
-
-@app.post("/admin/publish_event")
-@requires_auth
-def publish_event():
-    event_name = request.form["event_name"]
-    event_rules = request.form["event_rules"]
-    end_date = request.form["end_date"]
-
-    options = []
-    i = 1
-    while True:
-        key = f"option_{i}"
-        if key not in request.form:
-            break
-        text = request.form[key].strip()
-        if text:
-            options.append({"text": text, "votes": 0})
-        i += 1
-
-    event_uuid = str(uuid.uuid4())[:8]
-    event = {
-        "event_uuid": event_uuid,
-        "name": event_name,
-        "description": event_rules,
-        "options": options,
-        "end_date": end_date.replace("T", " ") + ":00",
-        "is_published": True,
-        "creator_id": int(ADMIN_ID) if ADMIN_ID else None,
-        "participants": 0,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-
-    new_event = db.create_event(event)
-    if new_event:
-        for idx in range(len(options)):
-            db.create_prediction_market(event_uuid, idx)
-
-        for u in db.get_approved_users():
-            msg = (
-                f"Новое мероприятие!\n\n{event_name}\n{event_rules[:100]}...\n"
-                f"⏰ До: {_format_end_short(event['end_date'])}\n\nИспользуйте /app → Mini App."
-            )
-            send_message(u["chat_id"], msg)
-
-        return f"<h3>✅ Опубликовано</h3><p>Название: {event_name}</p><p>Вариантов: {len(options)}</p><p>Окончание: {end_date}</p>"
-
-    return Response("Ошибка при создании события", 500)
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+        bounds = db.week_current_bounds()
+        items = db.get_leaderboard_week(bounds["start"], limit=50)
+    return jsonify(success=True, week=bounds, items=items)
