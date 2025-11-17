@@ -271,8 +271,8 @@ MINI_APP_HTML = """
                     <small>Цена ДА: {{ '%.3f' % md.yes_price }} | НЕТ: {{ '%.3f' % md.no_price }}</small>
                   </div>
                   <div>
-                    <button class="btn yes" onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'yes', {{ opt.text|tojson }})">Купить ДА</button>
-                    <button class="btn no"  onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'no',  {{ opt.text|tojson }})">Купить НЕТ</button>
+                    <button class="btn yes" onclick='openBuy("{{ e.event_uuid }}", {{ idx }}, "yes", {{ opt.text|tojson }})'>Купить ДА</button>
+                    <button class="btn no" onclick='openBuy("{{ e.event_uuid }}", {{ idx }}, "no", {{ opt.text|tojson }})'>Купить НЕТ</button>
                   </div>
                 </div>
               </div>
@@ -784,3 +784,4 @@ def admin_positions():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
