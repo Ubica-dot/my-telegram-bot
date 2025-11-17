@@ -205,7 +205,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ---------------- Mini App (кнопки ДА/НЕТ на каждый вариант + сворачивание секций) ----------------
+# ---------------- Mini App (вероятность ДА слева от кнопок, без цен) ----------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -217,11 +217,10 @@ MINI_APP_HTML = """
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }
     .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
     .opt  { padding: 8px; border: 1px dashed #ccc; border-radius: 8px; margin: 6px 0; }
-    .btn  { padding: 8px 10px; margin-right: 8px; border: 0; border-radius: 8px; cursor: pointer; color: #fff; }
+    .btn  { padding: 8px 10px; margin-right: 8px; border: 0; border-radius: 8px; cursor: pointer; color: #fff; font-size: 14px; }
     .yes  { background: #2e7d32; }
     .no   { background: #c62828; }
     .row  { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-    small { color: #666; }
     .muted { color: #666; font-size: 14px; }
     .section { margin: 16px 0; }
     .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; }
@@ -229,6 +228,7 @@ MINI_APP_HTML = """
     .caret { transition: transform .15s ease; }
     .collapsed .caret { transform: rotate(-90deg); }
     .section-body { padding:10px 0 0 0; }
+    .prob { color:#000; font-weight:700; font-size:18px; margin-right:12px; }
     /* modal */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
     .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
@@ -269,9 +269,7 @@ MINI_APP_HTML = """
               <div class="opt" data-option="{{ idx }}">
                 <div><b>{{ opt.text }}</b></div>
                 <div class="row">
-                  <div>
-                    <small>Цена ДА: {{ '%.3f' % md.yes_price }} | НЕТ: {{ '%.3f' % md.no_price }}</small>
-                  </div>
+                  <div class="prob" title="Вероятность ДА">{{ ('%.0f' % (md.yes_price * 100)) }}%</div>
                   <div>
                     <button class="btn yes buy-btn"
                             data-event="{{ e.event_uuid }}"
@@ -465,12 +463,13 @@ MINI_APP_HTML = """
           return;
         }
 
-        // Обновим цены у соответствующего варианта
+        // Обновим вероятность у соответствующего варианта
         const card = document.querySelector(`[data-event='${buyCtx.event_uuid}'] [data-option='${buyCtx.option_index}']`);
         if (card) {
-          const small = card.querySelector("small");
-          if (small) {
-            small.textContent = `Цена ДА: ${data.market.yes_price.toFixed(3)} | НЕТ: ${data.market.no_price.toFixed(3)}`;
+          const probEl = card.querySelector(".prob");
+          if (probEl) {
+            const prob = Math.round(data.market.yes_price * 100);
+            probEl.textContent = `${prob}%`;
           }
         }
 
@@ -486,7 +485,7 @@ MINI_APP_HTML = """
       }
     }
 
-    // Делегирование кликов по кнопкам покупки (надёжнее, чем inline onclick)
+    // Делегирование кликов по кнопкам покупки
     document.addEventListener('click', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
