@@ -1,6 +1,8 @@
 import os
 import json
 import uuid
+import hmac
+import hashlib
 from datetime import datetime
 
 import requests
@@ -19,6 +21,8 @@ TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "change-me")
 ADMIN_BASIC_USER = os.getenv("ADMIN_BASIC_USER", "admin")
 ADMIN_BASIC_PASS = os.getenv("ADMIN_BASIC_PASS", "admin")
 
+WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # опционально, но рекомендуется
+
 
 # ---------------- Admin auth ----------------
 def _check_auth(u, p):
@@ -36,11 +40,10 @@ def requires_auth(fn):
         if not auth or not _check_auth(auth.username, auth.password):
             return _auth_required()
         return fn(*args, **kwargs)
-
     return wrapper
 
 
-# ---------------- Telegram utils ----------------
+# ---------------- Utils ----------------
 def send_message(chat_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
@@ -59,7 +62,6 @@ def notify_admin(text: str):
         send_message(ADMIN_ID, text)
 
 
-# ---------------- Webhook setup ----------------
 def ensure_webhook():
     if not (BASE_URL and TOKEN):
         print("[setWebhook] skipped: BASE_URL or TOKEN missing")
@@ -77,10 +79,22 @@ def ensure_webhook():
 
 @app.before_request
 def _init_once():
-    # Однократная инициализация при первом запросе к любому роуту
     if not getattr(app, "_init_done", False):
         ensure_webhook()
         app._init_done = True
+
+
+def make_sig(chat_id: int) -> str:
+    if not WEBAPP_SIGNING_SECRET:
+        return ""
+    msg = str(chat_id).encode()
+    return hmac.new(WEBAPP_SIGNING_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:32]
+
+
+def verify_sig(chat_id: int, sig: str) -> bool:
+    if not WEBAPP_SIGNING_SECRET:
+        return True
+    return hmac.compare_digest(make_sig(chat_id), sig or "")
 
 
 # ---------------- Health ----------------
@@ -150,15 +164,17 @@ def telegram_webhook():
             send_message(chat_id, f"Ваш текущий баланс: {balance} кредитов")
 
     elif text == "/app":
-        web_app_url = f"https://{request.host}/mini-app"
+        # Добавим chat_id и подпись в URL, чтобы мини‑апп всегда знало пользователя
+        sig = make_sig(chat_id)
+        web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}"
+        if sig:
+            web_app_url += f"&sig={sig}"
         kb = {
             "inline_keyboard": [
-                [
-                    {"text": "Открыть Mini App", "web_app": {"url": web_app_url}}
-                ]
+                [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]
             ]
         }
-        send_message(chat_id, "Откройте мини‑приложение для удобного просмотра мероприятий:", kb)
+        send_message(chat_id, "Откройте мини‑приложение для просмотра и покупки:", kb)
 
     elif text.startswith("/"):
         if not is_approved:
@@ -186,7 +202,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ---------------- Mini App (пер‑вариантные кнопки ДА/НЕТ) ----------------
+# ---------------- Mini App (кнопки ДА/НЕТ на каждый вариант + активные ставки) ----------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -203,10 +219,21 @@ MINI_APP_HTML = """
     .no   { background: #c62828; }
     .row  { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
     small { color: #666; }
+    .muted { color: #666; font-size: 14px; }
+    .section { margin: 16px 0; }
+    /* modal */
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
+    .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
+    .modal h3 { margin:0 0 8px 0; }
+    .modal .row { justify-content: flex-start; }
+    input[type=number] { padding:8px; width: 120px; }
   </style>
 </head>
 <body>
-  <h2>Активные мероприятия</h2>
+  <h2>Активные ставки</h2>
+  <div id="active" class="section muted">Загрузка...</div>
+
+  <h2>Мероприятия</h2>
   {% for e in events %}
     <div class="card" data-event="{{ e.event_uuid }}">
       <div><b>{{ e.name }}</b></div>
@@ -222,8 +249,8 @@ MINI_APP_HTML = """
               <small>Цена ДА: {{ '%.3f' % md.yes_price }} | НЕТ: {{ '%.3f' % md.no_price }}</small>
             </div>
             <div>
-              <button class="btn yes" onclick="buy('{{ e.event_uuid }}', {{ idx }}, 'yes')">Купить ДА</button>
-              <button class="btn no"  onclick="buy('{{ e.event_uuid }}', {{ idx }}, 'no')">Купить НЕТ</button>
+              <button class="btn yes" onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'yes')">Купить ДА</button>
+              <button class="btn no"  onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'no')">Купить НЕТ</button>
             </div>
           </div>
         </div>
@@ -231,30 +258,137 @@ MINI_APP_HTML = """
     </div>
   {% endfor %}
 
+  <!-- Modal -->
+  <div id="modalBg" class="modal-bg">
+    <div class="modal">
+      <h3 id="mTitle">Покупка</h3>
+      <div class="muted" id="mSub">Укажите сумму, не выше вашего баланса.</div>
+      <div class="row" style="margin-top:10px;">
+        <label>Сумма (кредиты):&nbsp;</label>
+        <input type="number" id="mAmount" min="1" step="1" value="100"/>
+      </div>
+      <div class="muted" id="mHint" style="margin-top:8px;"></div>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn yes" onclick="confirmBuy()">Купить</button>
+        <button class="btn no"  onclick="closeBuy()">Отмена</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     if (tg) tg.ready();
 
+    const qs = new URLSearchParams(location.search);
+    const CHAT_ID = qs.get("chat_id");
+    const SIG = qs.get("sig") || "";
+
+    function needChatId() {
+      if (CHAT_ID) return false;
+      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) return false;
+      return true;
+    }
+
     function getChatId() {
+      if (CHAT_ID) return CHAT_ID;
       if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) {
         return tg.initDataUnsafe.user.id;
       }
-      const p = new URLSearchParams(location.search);
-      return p.get("chat_id");
+      return null;
     }
 
-    async function buy(event_uuid, option_index, side) {
-      const chat_id = getChatId();
-      if (!chat_id) { alert("Не удалось получить chat_id."); return; }
-
-      const amount = prompt("Сумма покупки (в кредитах):", "100");
-      if (!amount) return;
-
+    async function fetchMe() {
+      const cid = getChatId();
+      if (!cid) {
+        document.getElementById("active").textContent = "Не удалось получить chat_id. Откройте Mini App из чата командой /app.";
+        return;
+      }
       try {
+        const url = `/api/me?chat_id=${cid}` + (SIG ? `&sig=${SIG}` : "");
+        const r = await fetch(url);
+        const data = await r.json();
+        if (!r.ok || !data.success) {
+          document.getElementById("active").textContent = "Ошибка загрузки профиля.";
+          return;
+        }
+        renderActive(data);
+      } catch (e) {
+        document.getElementById("active").textContent = "Сетевая ошибка.";
+      }
+    }
+
+    function renderActive(data) {
+      const div = document.getElementById("active");
+      div.innerHTML = "";
+      const p = document.createElement("div");
+      p.innerHTML = `<b>Баланс:</b> ${data.user.balance} кредитов`;
+      div.appendChild(p);
+
+      if (!data.positions || data.positions.length === 0) {
+        const m = document.createElement("div");
+        m.className = "muted";
+        m.textContent = "У вас пока нет активных ставок.";
+        div.appendChild(m);
+        return;
+      }
+
+      data.positions.forEach(pos => {
+        const el = document.createElement("div");
+        el.className = "card";
+        el.innerHTML = `
+          <div><b>${pos.event_name}</b></div>
+          <div class="muted">Вариант ${pos.option_index + 1}: ${pos.option_text}</div>
+          <div class="muted">Сторона: ${pos.share_type.toUpperCase()}</div>
+          <div>Кол-во: ${(+pos.quantity).toFixed(4)} | Ср. цена: ${(+pos.average_price).toFixed(4)}</div>
+          <div class="muted">Тек. цена ДА/НЕТ: ${(+pos.current_yes_price).toFixed(3)} / ${(+pos.current_no_price).toFixed(3)}</div>
+        `;
+        div.appendChild(el);
+      });
+    }
+
+    // Покупка
+    let buyCtx = null;
+
+    function openBuy(event_uuid, option_index, side) {
+      const cid = getChatId();
+      if (!cid) {
+        alert("Не удалось получить chat_id. Откройте Mini App из чата командой /app.");
+        return;
+      }
+      buyCtx = { event_uuid, option_index, side, chat_id: cid };
+      document.getElementById("mTitle").textContent = `Покупка: ${side.toUpperCase()} · вариант ${option_index+1}`;
+      document.getElementById("mHint").textContent = "Сумма будет списана с вашего баланса.";
+      document.getElementById("mAmount").value = "100";
+      document.getElementById("modalBg").style.display = "flex";
+      if (tg) tg.HapticFeedback.impactOccurred("light");
+    }
+
+    function closeBuy() {
+      document.getElementById("modalBg").style.display = "none";
+      buyCtx = null;
+    }
+
+    async function confirmBuy() {
+      if (!buyCtx) return;
+      const amount = parseFloat(document.getElementById("mAmount").value || "0");
+      if (!(amount > 0)) {
+        alert("Введите положительную сумму");
+        return;
+      }
+      try {
+        const body = {
+          chat_id: +buyCtx.chat_id,
+          event_uuid: buyCtx.event_uuid,
+          option_index: buyCtx.option_index,
+          side: buyCtx.side,
+          amount
+        };
+        if (SIG) body.sig = SIG;
+
         const r = await fetch("/api/market/buy", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id, event_uuid, option_index, side, amount: parseFloat(amount) })
+          body: JSON.stringify(body)
         });
         const data = await r.json();
         if (!r.ok || !data.success) {
@@ -262,19 +396,33 @@ MINI_APP_HTML = """
           return;
         }
 
-        const card = document.querySelector(`[data-event='${event_uuid}'] [data-option='${option_index}']`);
+        // Обновим цены у соответствующего варианта
+        const card = document.querySelector(`[data-event='${buyCtx.event_uuid}'] [data-option='${buyCtx.option_index}']`);
         if (card) {
           const small = card.querySelector("small");
           if (small) {
             small.textContent = `Цена ДА: ${data.market.yes_price.toFixed(3)} | НЕТ: ${data.market.no_price.toFixed(3)}`;
           }
         }
-        if (tg) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${side.toUpperCase()})` });
+
+        // Перерисуем активные ставки и баланс
+        await fetchMe();
+
+        closeBuy();
+        if (tg) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${buyCtx.side.toUpperCase()})` });
         else alert("Успех: куплено " + data.trade.got_shares.toFixed(4) + " акций");
       } catch (e) {
         console.error(e);
         alert("Сетевая ошибка");
       }
+    }
+
+    // Инициализация
+    if (needChatId()) {
+      // Сообщим пользователю
+      document.getElementById("active").textContent = "Не удалось получить chat_id. Откройте Mini App из чата командой /app.";
+    } else {
+      fetchMe();
     }
   </script>
 </body>
@@ -301,6 +449,28 @@ def mini_app():
     return render_template_string(MINI_APP_HTML, events=enriched, enumerate=enumerate)
 
 
+# --------- API ---------
+@app.get("/api/me")
+def api_me():
+    try:
+        chat_id = int(request.args.get("chat_id", "0"))
+    except Exception:
+        return jsonify(success=False, error="bad_chat_id"), 400
+
+    sig = request.args.get("sig", "")
+    if not verify_sig(chat_id, sig):
+        return jsonify(success=False, error="bad_sig"), 403
+
+    u = db.get_user(chat_id)
+    if not u:
+        return jsonify(success=False, error="user_not_found"), 404
+    if u.get("status") != "approved":
+        return jsonify(success=False, error="not_approved"), 403
+
+    positions = db.get_user_positions(chat_id)
+    return jsonify(success=True, user={"chat_id": chat_id, "balance": u.get("balance", 0)}, positions=positions)
+
+
 @app.post("/api/market/buy")
 def api_market_buy():
     payload = request.get_json(silent=True) or {}
@@ -312,6 +482,10 @@ def api_market_buy():
         amount = float(payload.get("amount"))
     except Exception:
         return jsonify(success=False, error="bad_payload"), 400
+
+    sig = payload.get("sig", "")
+    if not verify_sig(chat_id, sig):
+        return jsonify(success=False, error="bad_sig"), 403
 
     result, err = db.trade_buy(
         chat_id=chat_id,
@@ -378,6 +552,9 @@ ADMIN_PANEL_HTML = """
 
   <h2>Управление мероприятиями</h2>
   <p><a href="/admin/create_event">Создать новое мероприятие</a></p>
+
+  <h2>Торговля</h2>
+  <p><a href="/admin/orders">Последние сделки</a> · <a href="/admin/positions">Позиции пользователей</a></p>
 </body>
 </html>
 """
@@ -509,6 +686,47 @@ def publish_event():
     return Response("Ошибка при создании события", 500)
 
 
+# -------- Admin: orders & positions --------
+@app.get("/admin/orders")
+@requires_auth
+def admin_orders():
+    orders = db.get_recent_orders(limit=200)
+    rows = []
+    rows.append("<h2>Последние сделки</h2><table border=1 cellpadding=6 cellspacing=0>")
+    rows.append("<tr><th>Время</th><th>Пользователь</th><th>Событие / Вариант</th><th>Сторона</th><th>Сумма</th><th>Акций</th><th>Цена</th></tr>")
+    for o in orders:
+        rows.append(
+            f"<tr><td>{o['created_at'][:16]}</td>"
+            f"<td>{o['user_chat_id']}</td>"
+            f"<td>{o['event_name']}<br><small>Вариант {o['option_index']+1}: {o['option_text']}</small></td>"
+            f"<td>{o['side'].upper()}</td>"
+            f"<td>{o['amount']}</td>"
+            f"<td>{o['shares']}</td>"
+            f"<td>{o['price']:.4f}</td></tr>"
+        )
+    rows.append("</table><p><a href='/admin'>← Назад</a></p>")
+    return Response("\n".join(rows), mimetype="text/html")
+
+
+@app.get("/admin/positions")
+@requires_auth
+def admin_positions():
+    positions = db.get_all_positions(limit=500)
+    rows = []
+    rows.append("<h2>Позиции пользователей</h2><table border=1 cellpadding=6 cellspacing=0>")
+    rows.append("<tr><th>Пользователь</th><th>Событие / Вариант</th><th>Сторона</th><th>Кол-во</th><th>Ср. цена</th><th>Тек. цена ДА/НЕТ</th></tr>")
+    for p in positions:
+        rows.append(
+            f"<tr><td>{p['user_chat_id']}</td>"
+            f"<td>{p['event_name']}<br><small>Вариант {p['option_index']+1}: {p['option_text']}</small></td>"
+            f"<td>{p['share_type'].upper()}</td>"
+            f"<td>{float(p['quantity']):.4f}</td>"
+            f"<td>{float(p['average_price']):.4f}</td>"
+            f"<td>{float(p['current_yes_price']):.3f} / {float(p['current_no_price']):.3f}</td></tr>"
+        )
+    rows.append("</table><p><a href='/admin'>← Назад</a></p>")
+    return Response("\n".join(rows), mimetype="text/html")
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
-
