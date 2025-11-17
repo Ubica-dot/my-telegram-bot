@@ -209,9 +209,12 @@ MINI_APP_HTML = """
     .opt  { padding: 10px; border: 1px dashed #ccc; border-radius: 10px; margin: 6px 0;
             display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: stretch; }
     .opt-title { display:flex; align-items:center; font-weight: 700; }
-    .btn  { padding: 8px 12px; border: 0; border-radius: 10px; cursor: pointer; color: #fff; font-size: 14px; }
-    .yes  { background: #2e7d32; }
-    .no   { background: #c62828; }
+    .btn  { padding: 8px 12px; border: 0; border-radius: 10px; cursor: pointer; font-size: 14px; }
+    /* Палитра кнопок: мягкие фоны (не через alpha), текст — насыщенный цвет */
+    .yes  { background: #CDEAD2; color: #2e7d32; border: 2px solid #2e7d32; }
+    .no   { background: #F3C7C7; color: #c62828; border: 2px solid #c62828; }
+    .yes:hover { background: #BFE1C6; }
+    .no:hover  { background: #ECB3B3; }
     .actions { display:flex; gap: 8px; align-items: stretch; height: 100%; }
     .actions .btn { height: 100%; display:flex; align-items:center; justify-content:center; }
     .muted { color: #666; font-size: 14px; }
@@ -299,13 +302,13 @@ MINI_APP_HTML = """
                           data-event="{{ e.event_uuid }}"
                           data-index="{{ idx }}"
                           data-side="yes"
-                          data-text="{{ opt.text|e }}">Да</button>
+                          data-text="{{ opt.text|e }}">ДА</button>
 
                   <button class="btn no buy-btn"
                           data-event="{{ e.event_uuid }}"
                           data-index="{{ idx }}"
                           data-side="no"
-                          data-text="{{ opt.text|e }}">Нет</button>
+                          data-text="{{ opt.text|e }}">НЕТ</button>
                 </div>
               </div>
             {% endfor %}
@@ -315,13 +318,13 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Таблица лидеров -->
+  <!-- Таблица лидеров (свернута по умолчанию) -->
   <div id="wrap-leaders" class="section">
     <div id="head-leaders" class="section-head" onclick="toggleLeaders()">
       <span class="section-title">Таблица лидеров</span>
-      <span id="caret-leaders" class="caret">▾</span>
+      <span id="caret-leaders" class="caret">▸</span>
     </div>
-    <div id="section-leaders" class="section-body">
+    <div id="section-leaders" class="section-body" style="display:none;">
       <div id="lb-range" class="lb-head">—</div>
       <div id="lb-container" class="lb-table">Загрузка…</div>
     </div>
@@ -617,7 +620,7 @@ MINI_APP_HTML = """
       applySavedCollapses();
       setAvatar();
       fetchMe();
-      fetchLeaderboard(); // подгружаем лидеров сразу
+      // Лидеров по умолчанию не загружаем — загрузятся при первом раскрытии
     })();
   </script>
 </body>
