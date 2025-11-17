@@ -77,6 +77,7 @@ def ensure_webhook():
         print(f"[setWebhook] error: {e}")
 
 
+# Flask 3.x — однократная инициализация
 @app.before_request
 def _init_once():
     if not getattr(app, "_init_done", False):
@@ -202,7 +203,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ---------------- Mini App (кнопки ДА/НЕТ на каждый вариант + активные ставки) ----------------
+# ---------------- Mini App (кнопки ДА/НЕТ на каждый вариант + сворачивание секций) ----------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -221,42 +222,66 @@ MINI_APP_HTML = """
     small { color: #666; }
     .muted { color: #666; font-size: 14px; }
     .section { margin: 16px 0; }
+    .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; }
+    .section-title { font-weight:600; }
+    .caret { transition: transform .15s ease; }
+    .collapsed .caret { transform: rotate(-90deg); }
+    .section-body { padding:10px 0 0 0; }
     /* modal */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
     .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
     .modal h3 { margin:0 0 8px 0; }
     .modal .row { justify-content: flex-start; }
-    input[type=number] { padding:8px; width: 120px; }
+    input[type=number] { padding:8px; width: 140px; }
   </style>
 </head>
 <body>
-  <h2>Активные ставки</h2>
-  <div id="active" class="section muted">Загрузка...</div>
 
-  <h2>Мероприятия</h2>
-  {% for e in events %}
-    <div class="card" data-event="{{ e.event_uuid }}">
-      <div><b>{{ e.name }}</b></div>
-      <div><small>До: {{ e.end_date[:16] }}</small></div>
-      <p>{{ e.description }}</p>
-
-      {% for idx, opt in enumerate(e.options) %}
-        {% set md = e.markets.get(idx, {'yes_price': 0.5, 'no_price': 0.5}) %}
-        <div class="opt" data-option="{{ idx }}">
-          <div><b>Вариант {{ idx + 1 }}:</b> {{ opt.text }}</div>
-          <div class="row">
-            <div>
-              <small>Цена ДА: {{ '%.3f' % md.yes_price }} | НЕТ: {{ '%.3f' % md.no_price }}</small>
-            </div>
-            <div>
-              <button class="btn yes" onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'yes')">Купить ДА</button>
-              <button class="btn no"  onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'no')">Купить НЕТ</button>
-            </div>
-          </div>
-        </div>
-      {% endfor %}
+  <!-- Активные ставки -->
+  <div id="wrap-active" class="section">
+    <div id="head-active" class="section-head" onclick="toggleSection('active')">
+      <span class="section-title">Активные ставки</span>
+      <span id="caret-active" class="caret">▾</span>
     </div>
-  {% endfor %}
+    <div id="section-active" class="section-body">
+      <div id="active" class="muted">Загрузка...</div>
+    </div>
+  </div>
+
+  <!-- Мероприятия -->
+  <div id="wrap-events" class="section">
+    <div id="head-events" class="section-head" onclick="toggleSection('events')">
+      <span class="section-title">Мероприятия</span>
+      <span id="caret-events" class="caret">▾</span>
+    </div>
+    <div id="section-events" class="section-body">
+      <div id="events-list">
+        {% for e in events %}
+          <div class="card" data-event="{{ e.event_uuid }}">
+            <div><b>{{ e.name }}</b></div>
+            <div><small>До: {{ e.end_date[:16] }}</small></div>
+            <p>{{ e.description }}</p>
+
+            {% for idx, opt in enumerate(e.options) %}
+              {% set md = e.markets.get(idx, {'yes_price': 0.5, 'no_price': 0.5}) %}
+              <div class="opt" data-option="{{ idx }}">
+                <div><b>{{ opt.text }}</b></div>
+                <div class="row">
+                  <div>
+                    <small>Цена ДА: {{ '%.3f' % md.yes_price }} | НЕТ: {{ '%.3f' % md.no_price }}</small>
+                  </div>
+                  <div>
+                    <button class="btn yes" onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'yes', {{ opt.text|tojson }})">Купить ДА</button>
+                    <button class="btn no"  onclick="openBuy('{{ e.event_uuid }}', {{ idx }}, 'no',  {{ opt.text|tojson }})">Купить НЕТ</button>
+                  </div>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
 
   <!-- Modal -->
   <div id="modalBg" class="modal-bg">
@@ -283,12 +308,6 @@ MINI_APP_HTML = """
     const CHAT_ID = qs.get("chat_id");
     const SIG = qs.get("sig") || "";
 
-    function needChatId() {
-      if (CHAT_ID) return false;
-      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) return false;
-      return true;
-    }
-
     function getChatId() {
       if (CHAT_ID) return CHAT_ID;
       if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) {
@@ -297,10 +316,49 @@ MINI_APP_HTML = """
       return null;
     }
 
+    // --- Секции: сворачивание/разворачивание с запоминанием ---
+    function toggleSection(name) {
+      const body = document.getElementById("section-" + name);
+      const caret = document.getElementById("caret-" + name);
+      const head = document.getElementById("head-" + name);
+      const key = "collapse_" + name;
+
+      const nowShown = body.style.display !== "none";
+      if (nowShown) {
+        body.style.display = "none";
+        caret.textContent = "▸";
+        head.classList.add("collapsed");
+        try { localStorage.setItem(key, "1"); } catch(e){}
+      } else {
+        body.style.display = "block";
+        caret.textContent = "▾";
+        head.classList.remove("collapsed");
+        try { localStorage.setItem(key, "0"); } catch(e){}
+      }
+    }
+
+    function applySavedCollapses() {
+      ["active","events"].forEach(name => {
+        const key = "collapse_" + name;
+        let collapsed = "0";
+        try { collapsed = localStorage.getItem(key) || "0"; } catch(e){}
+        if (collapsed === "1") {
+          const body = document.getElementById("section-" + name);
+          const caret = document.getElementById("caret-" + name);
+          const head = document.getElementById("head-" + name);
+          body.style.display = "none";
+          caret.textContent = "▸";
+          head.classList.add("collapsed");
+        }
+      });
+    }
+
+    // --- Профиль и активные позиции ---
     async function fetchMe() {
       const cid = getChatId();
+      const activeDiv = document.getElementById("active");
       if (!cid) {
-        document.getElementById("active").textContent = "Не удалось получить chat_id. Откройте Mini App из чата командой /app.";
+        activeDiv.textContent = "Не удалось получить chat_id. Откройте Mini App из чата командой /app.";
         return;
       }
       try {
@@ -308,12 +366,12 @@ MINI_APP_HTML = """
         const r = await fetch(url);
         const data = await r.json();
         if (!r.ok || !data.success) {
-          document.getElementById("active").textContent = "Ошибка загрузки профиля.";
+          activeDiv.textContent = "Ошибка загрузки профиля.";
           return;
         }
         renderActive(data);
       } catch (e) {
-        document.getElementById("active").textContent = "Сетевая ошибка.";
+        activeDiv.textContent = "Сетевая ошибка.";
       }
     }
 
@@ -337,7 +395,7 @@ MINI_APP_HTML = """
         el.className = "card";
         el.innerHTML = `
           <div><b>${pos.event_name}</b></div>
-          <div class="muted">Вариант ${pos.option_index + 1}: ${pos.option_text}</div>
+          <div class="muted">${pos.option_text}</div>
           <div class="muted">Сторона: ${pos.share_type.toUpperCase()}</div>
           <div>Кол-во: ${(+pos.quantity).toFixed(4)} | Ср. цена: ${(+pos.average_price).toFixed(4)}</div>
           <div class="muted">Тек. цена ДА/НЕТ: ${(+pos.current_yes_price).toFixed(3)} / ${(+pos.current_no_price).toFixed(3)}</div>
@@ -346,21 +404,21 @@ MINI_APP_HTML = """
       });
     }
 
-    // Покупка
+    // --- Покупка ---
     let buyCtx = null;
 
-    function openBuy(event_uuid, option_index, side) {
+    function openBuy(event_uuid, option_index, side, optText) {
       const cid = getChatId();
       if (!cid) {
         alert("Не удалось получить chat_id. Откройте Mini App из чата командой /app.");
         return;
       }
-      buyCtx = { event_uuid, option_index, side, chat_id: cid };
-      document.getElementById("mTitle").textContent = `Покупка: ${side.toUpperCase()} · вариант ${option_index+1}`;
+      buyCtx = { event_uuid, option_index, side, chat_id: cid, optText };
+      document.getElementById("mTitle").textContent = `Покупка: ${side.toUpperCase()} · ${optText}`;
       document.getElementById("mHint").textContent = "Сумма будет списана с вашего баланса.";
       document.getElementById("mAmount").value = "100";
       document.getElementById("modalBg").style.display = "flex";
-      if (tg) tg.HapticFeedback.impactOccurred("light");
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
     }
 
     function closeBuy() {
@@ -409,7 +467,7 @@ MINI_APP_HTML = """
         await fetchMe();
 
         closeBuy();
-        if (tg) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${buyCtx.side.toUpperCase()})` });
+        if (tg && tg.showPopup) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${buyCtx.side.toUpperCase()})` });
         else alert("Успех: куплено " + data.trade.got_shares.toFixed(4) + " акций");
       } catch (e) {
         console.error(e);
@@ -418,12 +476,8 @@ MINI_APP_HTML = """
     }
 
     // Инициализация
-    if (needChatId()) {
-      // Сообщим пользователю
-      document.getElementById("active").textContent = "Не удалось получить chat_id. Откройте Mini App из чата командой /app.";
-    } else {
-      fetchMe();
-    }
+    applySavedCollapses();
+    fetchMe();
   </script>
 </body>
 </html>
@@ -686,19 +740,19 @@ def publish_event():
     return Response("Ошибка при создании события", 500)
 
 
-# -------- Admin: orders & positions --------
+# -------- Admin: orders & positions (без префикса «Вариант N:») --------
 @app.get("/admin/orders")
 @requires_auth
 def admin_orders():
     orders = db.get_recent_orders(limit=200)
     rows = []
     rows.append("<h2>Последние сделки</h2><table border=1 cellpadding=6 cellspacing=0>")
-    rows.append("<tr><th>Время</th><th>Пользователь</th><th>Событие / Вариант</th><th>Сторона</th><th>Сумма</th><th>Акций</th><th>Цена</th></tr>")
+    rows.append("<tr><th>Время</th><th>Пользователь</th><th>Событие / Исход</th><th>Сторона</th><th>Сумма</th><th>Акций</th><th>Цена</th></tr>")
     for o in orders:
         rows.append(
             f"<tr><td>{o['created_at'][:16]}</td>"
             f"<td>{o['user_chat_id']}</td>"
-            f"<td>{o['event_name']}<br><small>Вариант {o['option_index']+1}: {o['option_text']}</small></td>"
+            f"<td>{o['event_name']}<br><small>{o['option_text']}</small></td>"
             f"<td>{o['side'].upper()}</td>"
             f"<td>{o['amount']}</td>"
             f"<td>{o['shares']}</td>"
@@ -714,11 +768,11 @@ def admin_positions():
     positions = db.get_all_positions(limit=500)
     rows = []
     rows.append("<h2>Позиции пользователей</h2><table border=1 cellpadding=6 cellspacing=0>")
-    rows.append("<tr><th>Пользователь</th><th>Событие / Вариант</th><th>Сторона</th><th>Кол-во</th><th>Ср. цена</th><th>Тек. цена ДА/НЕТ</th></tr>")
+    rows.append("<tr><th>Пользователь</th><th>Событие / Исход</th><th>Сторона</th><th>Кол-во</th><th>Ср. цена</th><th>Тек. цена ДА/НЕТ</th></tr>")
     for p in positions:
         rows.append(
             f"<tr><td>{p['user_chat_id']}</td>"
-            f"<td>{p['event_name']}<br><small>Вариант {p['option_index']+1}: {p['option_text']}</small></td>"
+            f"<td>{p['event_name']}<br><small>{p['option_text']}</small></td>"
             f"<td>{p['share_type'].upper()}</td>"
             f"<td>{float(p['quantity']):.4f}</td>"
             f"<td>{float(p['average_price']):.4f}</td>"
