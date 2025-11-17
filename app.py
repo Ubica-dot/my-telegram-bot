@@ -152,7 +152,7 @@ def telegram_webhook():
                 lines = ["Активные мероприятия:"]
                 for e in events:
                     lines.append(
-                        f"• {e['name']}\n{e['description'][:80]}...\n⏰ До: {e['end_date'][:16]}\nУчастников: {e.get('participants', 0)}\n"
+                        f"• {e['name']}\n{e['description'][:80]}...\nУчастников: {e.get('participants', 0)}\n"
                     )
                 send_message(chat_id, "\n\n".join(lines))
 
@@ -195,7 +195,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ------------- Mini App (аватар/инициалы, баланс, вероятности, ставки, лидеры) -------------
+# ------------- Mini App -------------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -210,14 +210,15 @@ MINI_APP_HTML = """
             display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: stretch; }
     .opt-title { display:flex; align-items:center; font-weight: 700; }
     .btn  { padding: 8px 12px; border: 0; border-radius: 10px; cursor: pointer; font-size: 14px; }
-    /* Палитра кнопок: мягкие фоны (не через alpha), текст — насыщенный цвет */
-    .yes  { background: #CDEAD2; color: #2e7d32; border: 2px solid #2e7d32; }
-    .no   { background: #F3C7C7; color: #c62828; border: 2px solid #c62828; }
+    /* Мягкие фоны (без alpha), текст — насыщенный цвет. Без обводки. */
+    .yes  { background: #CDEAD2; color: #2e7d32; }
+    .no   { background: #F3C7C7; color: #c62828; }
     .yes:hover { background: #BFE1C6; }
     .no:hover  { background: #ECB3B3; }
     .actions { display:flex; gap: 8px; align-items: stretch; height: 100%; }
     .actions .btn { height: 100%; display:flex; align-items:center; justify-content:center; }
     .muted { color: #666; font-size: 14px; }
+    .meta { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:12px; color:#666; }
     .section { margin: 20px 0; }
     .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; }
     .section-title { font-weight:600; }
@@ -289,11 +290,10 @@ MINI_APP_HTML = """
         {% for e in events %}
           <div class="card" data-event="{{ e.event_uuid }}">
             <div><b>{{ e.name }}</b></div>
-            <div><small>До: {{ e.end_date[:16] }}</small></div>
             <p>{{ e.description }}</p>
 
             {% for idx, opt in enumerate(e.options) %}
-              {% set md = e.markets.get(idx, {'yes_price': 0.5}) %}
+              {% set md = e.markets.get(idx, {'yes_price': 0.5, 'volume': 0, 'end_short': e.end_short}) %}
               <div class="opt" data-option="{{ idx }}">
                 <div class="opt-title">{{ opt.text }}</div>
                 <div class="prob" title="Вероятность ДА">{{ ('%.0f' % (md.yes_price * 100)) }}%</div>
@@ -309,6 +309,17 @@ MINI_APP_HTML = """
                           data-index="{{ idx }}"
                           data-side="no"
                           data-text="{{ opt.text|e }}">НЕТ</button>
+                </div>
+                <div class="meta">
+                  <div>
+                    {% set vol = (md.volume or 0) | int %}
+                    {% if vol >= 1000 %}
+                      {{ (vol // 1000) | int }} тыс. кредитов
+                    {% else %}
+                      {{ vol }} кредитов
+                    {% endif %}
+                  </div>
+                  <div>До {{ md.end_short }}</div>
                 </div>
               </div>
             {% endfor %}
@@ -620,29 +631,47 @@ MINI_APP_HTML = """
       applySavedCollapses();
       setAvatar();
       fetchMe();
-      // Лидеров по умолчанию не загружаем — загрузятся при первом раскрытии
+      // Лидеров загружаем при первом раскрытии
     })();
   </script>
 </body>
 </html>
 """
 
+def _format_end_short(end_iso: str) -> str:
+    try:
+        # ожидаем ISO, берём дату
+        dt = datetime.fromisoformat(end_iso.replace(" ", "T").split(".")[0])
+        return dt.strftime("%d.%m.%y")
+    except Exception:
+        # fallback: YYYY-MM-DD...
+        s = end_iso[:10]
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            y, m, d = s.split("-")
+            return f"{d}.{m}.{y[2:]}"
+        return end_iso[:10]
+
+
 @app.get("/mini-app")
 def mini_app():
     events = db.get_published_events()
     enriched = []
     for e in events:
+        # подготовим короткую дату для отображения
+        end_iso = str(e.get("end_date", ""))
+        e["end_short"] = _format_end_short(end_iso)
+
         mk = db.get_markets_for_event(e["event_uuid"])
         markets = {}
         for m in mk:
             yes = float(m["total_yes_reserve"])
             no = float(m["total_no_reserve"])
             total = yes + no
-            if total == 0:
-                yp, np = 0.5, 0.5
-            else:
-                yp, np = no / total, yes / total
-            markets[m["option_index"]] = {"yes_price": yp, "no_price": np}
+            # вероятность для YES
+            yp = (no / total) if total > 0 else 0.5
+            # объём ставок: сколько денег вошло в пул, сверх начальных резервов (1000+1000)
+            volume = max(0.0, total - 2000.0)
+            markets[m["option_index"]] = {"yes_price": yp, "volume": volume, "end_short": e["end_short"]}
         e["markets"] = markets
         enriched.append(e)
     return render_template_string(MINI_APP_HTML, events=enriched, enumerate=enumerate)
@@ -918,7 +947,7 @@ def publish_event():
         for u in db.get_approved_users():
             msg = (
                 f"Новое мероприятие!\n\n{event_name}\n{event_rules[:100]}...\n"
-                f"⏰ До: {end_date[:16]}\n\nИспользуйте /app → Mini App."
+                f"⏰ До: {_format_end_short(event['end_date'])}\n\nИспользуйте /app → Mini App."
             )
             send_message(u["chat_id"], msg)
 
