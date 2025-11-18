@@ -3,7 +3,7 @@ import json
 import hmac
 import hashlib
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qsl
 from functools import wraps
 from collections import deque, defaultdict
@@ -11,7 +11,7 @@ from collections import deque, defaultdict
 import requests
 from flask import Flask, request, render_template_string, jsonify, Response, stream_with_context
 
-from database import db
+from database import db  # имеет db.client (Supabase)
 
 app = Flask(__name__)
 
@@ -309,7 +309,7 @@ MINI_APP_HTML = """
     }
     .hover-spot:hover::after{ opacity:1; }
 
-    /* top header */
+    /* header */
     .header { display:flex; align-items:center; gap:12px; }
     .avatar { width: 56px; height: 56px; border-radius: 50%; border: 2px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,.06); object-fit:cover; }
     .avatarPH { width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;
@@ -319,13 +319,26 @@ MINI_APP_HTML = """
     .ubal { font-weight:900; font-size:14px; color:#0b8457; }
 
     input[type=text] { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; }
+    .toolbar { display:flex; gap:8px; align-items:center; }
+    .chk { display:inline-flex; gap:6px; align-items:center; font-size:12px; color:#666; }
 
-    /* leaders slider */
+    /* leaders switch */
     .seg { display:inline-flex; background:#f0f0f0; border-radius:999px; padding:4px; gap:4px; }
     .seg-btn { border:0; background:transparent; padding:6px 12px; border-radius:999px; font-weight:700; cursor:pointer; color:#444; transition:all .15s ease; }
     .seg-btn.active { background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.08); color:#111; }
 
-    /* footer link */
+    /* bookmark */
+    .bm { border:0;background:transparent;cursor:pointer;color:#bbb;font-size:16px; }
+    .bm.active { color:#f0b400; }
+    .card-head { display:flex; align-items:center; justify-content:space-between; }
+
+    /* charts */
+    .hist { margin-top:8px; padding:10px; border:1px solid #eee; border-radius:10px; }
+    .range { display:flex; gap:6px; margin-bottom:6px; }
+    .range button { border:0; border-radius:999px; padding:4px 10px; background:#f0f0f0; cursor:pointer; font-size:12px; }
+    .range button.active { background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+
+    /* footer */
     .footer { margin: 40px 6px 10px; text-align:center; }
     .footer a { color:#9aa; text-decoration:none; font-size:12px; opacity:.6; }
     .footer a:hover { opacity:.9; }
@@ -333,7 +346,7 @@ MINI_APP_HTML = """
 </head>
 <body>
 
-  <!-- Header with avatar, username, balance -->
+  <!-- Header -->
   <div class="header">
     <div id="avaPH" class="avatarPH">U</div>
     <img id="avaIMG" class="avatar" alt="avatar" style="display:none">
@@ -350,20 +363,11 @@ MINI_APP_HTML = """
       <span id="caret-active" class="caret">▾</span>
     </div>
     <div id="section-active" class="section-body">
-      <div style="margin:6px 0 8px"><input id="qActive" type="text" placeholder="Поиск по активным ставкам"></div>
+      <div class="toolbar" style="margin:6px 0 8px">
+        <input id="qActive" type="text" placeholder="Поиск по активным ставкам">
+        <label class="chk"><input id="fActiveBM" type="checkbox"> только закладки</label>
+      </div>
       <div id="active" class="muted">Загрузка...</div>
-    </div>
-  </div>
-
-  <!-- Архив ставок -->
-  <div id="wrap-arch" class="section">
-    <div id="head-arch" class="section-head hover-spot" onclick="toggleSection('arch')">
-      <span class="section-title">Прошедшие ставки (архив)</span>
-      <span id="caret-arch" class="caret">▾</span>
-    </div>
-    <div id="section-arch" class="section-body">
-      <div style="margin:6px 0 8px"><input id="qArch" type="text" placeholder="Поиск по архиву"></div>
-      <div id="arch" class="muted">Загрузка...</div>
     </div>
   </div>
 
@@ -374,8 +378,26 @@ MINI_APP_HTML = """
       <span id="caret-events" class="caret">▾</span>
     </div>
     <div id="section-events" class="section-body">
-      <div style="margin:6px 0 8px"><input id="qEvents" type="text" placeholder="Поиск по событиям и тегам"></div>
+      <div class="toolbar" style="margin:6px 0 8px">
+        <input id="qEvents" type="text" placeholder="Поиск по событиям и тегам">
+        <label class="chk"><input id="fEventsBM" type="checkbox"> только закладки</label>
+      </div>
       <div id="events-list"></div>
+    </div>
+  </div>
+
+  <!-- Архив ставок -->
+  <div id="wrap-arch" class="section">
+    <div id="head-arch" class="section-head hover-spot" onclick="toggleSection('arch')">
+      <span class="section-title">Прошедшие ставки (архив)</span>
+      <span id="caret-arch" class="caret">▾</span>
+    </div>
+    <div id="section-arch" class="section-body">
+      <div class="toolbar" style="margin:6px 0 8px">
+        <input id="qArch" type="text" placeholder="Поиск по архиву">
+        <label class="chk"><input id="fArchBM" type="checkbox"> только закладки</label>
+      </div>
+      <div id="arch" class="muted">Загрузка...</div>
     </div>
   </div>
 
@@ -461,38 +483,32 @@ MINI_APP_HTML = """
       else { b.style.display="block"; c.textContent="▾"; h.classList.remove("collapsed"); if (!toggleLeaders._loaded){ fetchLeaderboard('week'); toggleLeaders._loaded=true; } }
     }
 
-    // Header avatar/name/balance
+    // header fill
     function fillHeader(login, balance){
       const ph = document.getElementById('avaPH');
       const img= document.getElementById('avaIMG');
       const uname = document.getElementById('uname');
       const ubal = document.getElementById('ubal');
 
-      // username
       const tgUser = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
       const nick = (login || (tgUser && (tgUser.username || tgUser.first_name)) || "Профиль");
       uname.textContent = nick;
 
-      // balance to .00
       const balText = (typeof balance === 'number' && !isNaN(balance)) ? balance.toFixed(2) : "—";
       ubal.textContent = "Баланс: " + balText + " кредитов";
 
-      // avatar
       function tryImg(src){
         if (!src) return false;
         img.onload = ()=>{ img.style.display='block'; ph.style.display='none'; }
         img.onerror= ()=>{ img.style.display='none'; ph.style.display='flex'; }
         img.src = src; return true;
       }
-      // initials
       let initials = "";
       if (tgUser){
         if (tgUser.first_name) initials += tgUser.first_name[0];
         if (tgUser.last_name)  initials += tgUser.last_name[0];
         if (!initials && tgUser.username) initials = tgUser.username.slice(0,2);
-      } else if (login) {
-        initials = String(login).slice(0,2);
-      }
+      } else if (login) { initials = String(login).slice(0,2); }
       ph.textContent = (initials || "U").toUpperCase();
 
       if (tgUser && tgUser.photo_url) { if (tryImg(tgUser.photo_url)) return; }
@@ -505,65 +521,42 @@ MINI_APP_HTML = """
       }
     }
 
-    // Filters
-    function attachFilters(){
-      const qA = document.getElementById('qActive');
-      const qR = document.getElementById('qArch');
-      const qE = document.getElementById('qEvents');
-      if (qA){
-        qA.addEventListener('input', ()=>{
-          const needle = (qA.value||"").toLowerCase();
-          const cards = document.getElementById('active').querySelectorAll('.card');
-          cards.forEach(c=>{
-            const show = !needle || c.innerText.toLowerCase().includes(needle);
-            c.style.display = show ? '' : 'none';
-          });
-        });
-      }
-      if (qR){
-        qR.addEventListener('input', ()=>{
-          const needle = (qR.value||"").toLowerCase();
-          const rows = document.getElementById('arch').children;
-          [...rows].forEach(c=>{
-            const show = !needle || c.innerText.toLowerCase().includes(needle);
-            c.style.display = show ? '' : 'none';
-          });
-        });
-      }
-      if (qE){
-        qE.addEventListener('input', ()=>{
-          const needle = (qE.value||"").toLowerCase();
-          const cards = document.getElementById('events-list').children;
-          [...cards].forEach(c=>{
-            const tags = (c.dataset.tags || '').toLowerCase();
-            const show = !needle || c.innerText.toLowerCase().includes(needle) || tags.includes(needle);
-            c.style.display = show ? '' : 'none';
-          });
-        });
-      }
-    }
+    // bookmarks
+    const BMS = JSON.parse(localStorage.getItem('bookmarks_v1')||'{"events":{},"active":{},"arch":{}}');
+    function saveBMS(){ localStorage.setItem('bookmarks_v1', JSON.stringify(BMS)); }
+    function isBM(cat, key){ return !!(BMS[cat] && BMS[cat][key]); }
+    function toggleBM(cat, key, btn){ BMS[cat][key] = !isBM(cat,key); saveBMS(); if(btn){ btn.classList.toggle('active', BMS[cat][key]); } }
 
-    // Render helpers
-    function renderEvents(events){
+    // Render events (server injects __events)
+    const __events = {{ events|tojson|safe }};
+    function renderEvents(evts){
       const list = document.getElementById('events-list');
       list.innerHTML = "";
-      events.forEach(e=>{
+      evts.forEach(e=>{
         const card = document.createElement('div');
         card.className = 'card';
         card.dataset.event = e.event_uuid;
         card.dataset.tags = (e.tags||[]).join(',');
         card.dataset.end = e.end_ts || 0;
         card.dataset.vol = e.total_volume || 0;
-        const tagsLine = (e.tags && e.tags.length) ? `<div class="muted">Теги: ${e.tags.join(', ')}</div>` : '';
-        let optsHtml = '';
+
+        const bmKey = e.event_uuid;
+        const head = document.createElement('div');
+        head.className = 'card-head';
+        head.innerHTML = `<div><b>${e.name}</b></div><button class="bm ${isBM('events',bmKey)?'active':''}" title="Закладка">★</button>`;
+        head.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('events', bmKey, ev.currentTarget); };
+        head.onclick = ()=> toggleHistory(card, e);
+
+        let body = `<p class="muted">${e.description}</p>`;
+        if (e.tags && e.tags.length) body += `<div class="muted">Теги: ${e.tags.join(', ')}</div>`;
+
         (e.options||[]).forEach((opt, idx)=>{
           const md = (e.markets && e.markets[idx]) || {yes_price:0.5, volume:0, end_short:e.end_short, resolved:false, winner_side:null};
           const yes_pct = Math.round((md.yes_price||0.5)*100);
-          const no_pct  = 100-yes_pct;
-          optsHtml += `
+          body += `
             <div class="opt" data-option="${idx}">
               <div class="opt-title">${opt.text}</div>
-              <div class="prob" title="Вероятность ДА">${md.resolved ? ((md.winner_side==='yes')?'YES ✓':'NO ✓') : (yes_pct+'%')}</div>
+              <div class="prob" title="Вероятность ДА">${md.resolved ? ((md.winner_side==='yes')?'ДА ✓':'НЕТ ✓') : (yes_pct+'%')}</div>
               <div class="actions">
                 ${md.resolved ? `<button class="btn yes" disabled>Закрыт</button>` : `
                 <button class="btn yes buy-btn" data-event="${e.event_uuid}" data-index="${idx}" data-side="yes" data-text="${opt.text}">ДА</button>
@@ -575,12 +568,158 @@ MINI_APP_HTML = """
               <div class="meta-right">До ${md.end_short}</div>
             </div>`;
         });
-        card.innerHTML = `<div><b>${e.name}</b></div><p class="muted">${e.description}</p>${tagsLine}${optsHtml}`;
+
+        const hist = document.createElement('div');
+        hist.className = 'hist';
+        hist.style.display = 'none';
+        hist.innerHTML = `<div class="muted">Загрузка...</div>`;
+
+        card.appendChild(head);
+        const bodyWrap = document.createElement('div');
+        bodyWrap.innerHTML = body;
+        card.appendChild(bodyWrap);
+        card.appendChild(hist);
+
         list.appendChild(card);
       });
     }
+    renderEvents(__events);
 
-    // Fetch profile (positions + archive)
+    // history per event: charts per option
+    function toggleHistory(card, e){
+      const hist = card.querySelector('.hist');
+      if (hist.style.display === 'none'){
+        hist.style.display = 'block';
+        loadHistoryUI(hist, e);
+      } else {
+        hist.style.display = 'none';
+      }
+    }
+    function loadHistoryUI(container, e){
+      container.innerHTML = '';
+      (e.options||[]).forEach((opt, idx)=>{
+        const block = document.createElement('div');
+        block.style.marginBottom = '12px';
+        block.innerHTML = `
+          <div class="row" style="justify-content:space-between;">
+            <div><b>${opt.text}</b></div>
+            <div class="range" data-idx="${idx}">
+              ${['1Ч','6Ч','1Д','1Н','1М','ВСЕ'].map((t,i)=>`<button class="${i===2?'active':''}" data-range="${['1h','6h','1d','1w','1m','all'][i]}">${t}</button>`).join('')}
+            </div>
+          </div>
+          <canvas width="600" height="160" style="width:100%; max-width:100%;"></canvas>`;
+        container.appendChild(block);
+
+        const range = block.querySelector('.range');
+        range.addEventListener('click', (ev)=>{
+          const b = ev.target.closest('button'); if (!b) return;
+          range.querySelectorAll('button').forEach(x=>x.classList.toggle('active', x===b));
+          fetchAndDrawHistory(block.querySelector('canvas'), e.event_uuid, parseInt(range.dataset.idx,10), b.dataset.range);
+        });
+        // default 1Д
+        fetchAndDrawHistory(block.querySelector('canvas'), e.event_uuid, idx, '1d');
+      });
+    }
+    async function fetchAndDrawHistory(canvas, event_uuid, option_index, range){
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      try{
+        const url = `/api/market/history?event_uuid=${encodeURIComponent(event_uuid)}&option_index=${option_index}&range=${range}`;
+        const r = await fetch(url);
+        const data = await r.json();
+        if (!r.ok || !data.success || !data.points || !data.points.length){
+          ctx.fillStyle='#666'; ctx.fillText('Нет данных', 10, 20); return;
+        }
+        drawLineChart(canvas, data.points);
+      }catch(e){
+        ctx.fillStyle='#666'; ctx.fillText('Сетевая ошибка', 10, 20);
+      }
+    }
+    function drawLineChart(canvas, points){
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height, P=30;
+      const xs = points.map(p=>new Date(p.ts).getTime());
+      const ys = points.map(p=>p.yes_price);
+      const xmin = Math.min(...xs), xmax = Math.max(...xs);
+      const ymin = Math.min(...ys, 0), ymax = Math.max(...ys, 1);
+      // axes
+      ctx.clearRect(0,0,W,H);
+      ctx.strokeStyle='#eee'; ctx.lineWidth=1;
+      for (let i=0; i<=4; i++){
+        const y = P + (H-2*P)*(i/4);
+        ctx.beginPath(); ctx.moveTo(P, y); ctx.lineTo(W-P, y); ctx.stroke();
+      }
+      // line
+      ctx.strokeStyle = '#1976d2'; ctx.lineWidth=2;
+      ctx.beginPath();
+      points.forEach((p, i)=>{
+        const x = P + (W-2*P)*((new Date(p.ts).getTime()-xmin)/(xmax-xmin || 1));
+        const y = H-P - (H-2*P)*((p.yes_price - ymin)/(ymax - ymin || 1));
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+      // dots
+      ctx.fillStyle='#1976d2';
+      points.forEach((p)=>{
+        const x = P + (W-2*P)*((new Date(p.ts).getTime()-xmin)/(xmax-xmin || 1));
+        const y = H-P - (H-2*P)*((p.yes_price - ymin)/(ymax - ymin || 1));
+        ctx.beginPath(); ctx.arc(x,y,2,0,Math.PI*2); ctx.fill();
+      });
+      // labels
+      ctx.fillStyle='#444'; ctx.font='12px system-ui';
+      ctx.fillText('Цена ДА', P, P-10);
+      ctx.fillText('0', 5, H-P);
+      ctx.fillText('1', 5, P);
+    }
+
+    // Filters
+    function attachFilters(){
+      const qA = document.getElementById('qActive');
+      const fAB = document.getElementById('fActiveBM');
+      const qR = document.getElementById('qArch');
+      const fRB = document.getElementById('fArchBM');
+      const qE = document.getElementById('qEvents');
+      const fEB = document.getElementById('fEventsBM');
+
+      function filterActive(){
+        const needle = (qA.value||"").toLowerCase(), onlyBM = fAB.checked;
+        const cards = document.getElementById('active').querySelectorAll('.card');
+        cards.forEach(c=>{
+          const key = c.dataset.key || '';
+          const showBM = !onlyBM || isBM('active', key);
+          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
+          c.style.display = (showBM && showQ) ? '' : 'none';
+        });
+      }
+      function filterArch(){
+        const needle = (qR.value||"").toLowerCase(), onlyBM = fRB.checked;
+        const rows = document.getElementById('arch').querySelectorAll('.card');
+        rows.forEach(c=>{
+          const key = c.dataset.key || '';
+          const showBM = !onlyBM || isBM('arch', key);
+          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
+          c.style.display = (showBM && showQ) ? '' : 'none';
+        });
+      }
+      function filterEvents(){
+        const needle = (qE.value||"").toLowerCase(), onlyBM = fEB.checked;
+        const cards = document.getElementById('events-list').children;
+        [...cards].forEach(c=>{
+          const key = c.dataset.event || '';
+          const tags = (c.dataset.tags || '').toLowerCase();
+          const showBM = !onlyBM || isBM('events', key);
+          const showQ  = !needle || c.innerText.toLowerCase().includes(needle) || tags.includes(needle);
+          c.style.display = (showBM && showQ) ? '' : 'none';
+        });
+      }
+      if (qA) { qA.addEventListener('input', filterActive); fAB.addEventListener('change', filterActive); }
+      if (qR) { qR.addEventListener('input', filterArch);   fRB.addEventListener('change', filterArch); }
+      if (qE) { qE.addEventListener('input', filterEvents); fEB.addEventListener('change', filterEvents); }
+
+      // initial apply is done after data render
+    }
+
+    // Profile (positions + archive)
     async function fetchMe(){
       const cid = getChatId();
       const activeDiv = document.getElementById("active");
@@ -601,19 +740,24 @@ MINI_APP_HTML = """
         if (!r.ok || !data.success){ activeDiv.textContent = "Ошибка загрузки."; archDiv.textContent="Ошибка."; return; }
 
         fillHeader(data.user.login || "", Number(data.user.balance));
+
         // Active
         activeDiv.innerHTML = "";
         const pos = data.positions||[];
         if (!pos.length){ activeDiv.innerHTML = `<div class="muted">У вас пока нет активных ставок.</div>`; }
         else{
-          pos.forEach(p=>{
+          pos.forEach((p, i)=>{
             const qty = +p.quantity, avg=+p.average_price;
             const el = document.createElement('div');
             el.className = 'card';
+            el.dataset.key = (p.event_name||'')+'|'+(p.option_text||'')+'|'+(p.share_type||'');
             el.innerHTML = `
               <div class="row" style="justify-content:space-between;">
                 <div>
-                  <div><b>${p.event_name}</b></div>
+                  <div class="row" style="gap:8px">
+                    <div><b>${p.event_name}</b></div>
+                    <button class="bm ${isBM('active',el.dataset.key)?'active':''}" title="Закладка">★</button>
+                  </div>
                   <div class="muted">${p.option_text}</div>
                   <div class="muted">Сторона: ${p.share_type.toUpperCase()}</div>
                   <div>Кол-во: ${qty.toFixed(4)} | Ср. цена: ${avg.toFixed(4)}</div>
@@ -624,34 +768,48 @@ MINI_APP_HTML = """
                   <div class="muted" style="font-size:12px;">возможная выплата</div>
                 </div>
               </div>`;
+            el.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('active', el.dataset.key, ev.currentTarget); };
             activeDiv.appendChild(el);
           });
         }
+
+        // Events already rendered (server). Just attach filters after DOM present
+        attachFilters();
+        // Apply initial filter state (none checked)
+        document.getElementById('qActive').dispatchEvent(new Event('input'));
+        document.getElementById('qEvents').dispatchEvent(new Event('input'));
 
         // Archive
         archDiv.innerHTML = "";
         const arr = data.archive||[];
         if (!arr.length){ archDiv.innerHTML = `<div class="muted">Архив пуст.</div>`; }
         else{
-          arr.forEach(it=>{
+          arr.forEach((it, idx)=>{
             const win = !!it.is_win;
             const sign = win ? "+" : "−";
             const amount = Number(it.payout||0).toFixed(2);
             const when = (it.resolved_at||"").slice(0,16);
             const el = document.createElement('div');
             el.className = 'card';
+            el.dataset.key = (it.event_name||'')+'|'+(it.option_text||'')+'|'+(it.winner_side||'');
             el.style.background = win ? "#eaf7ef" : "#fdecec";
             el.innerHTML = `
               <div class="row" style="justify-content:space-between;">
                 <div>
-                  <div><b>${it.event_name || '—'}</b></div>
-                  <div class="muted">${(it.option_text||'—')} • исход: ${(it.winner_side||'—').toUpperCase()}</div>
+                  <div class="row" style="gap:8px">
+                    <div><b>${it.event_name || '—'}</b></div>
+                    <button class="bm ${isBM('arch',el.dataset.key)?'active':''}" title="Закладка">★</button>
+                  </div>
+                  <div class="muted">${(it.option_text||'—')} • исход: ${(it.winner_side||'—').toUpperCase()==='YES'?'ДА':(it.winner_side||'—').toUpperCase()==='NO'?'НЕТ':(it.winner_side||'—').toUpperCase()}</div>
                   <div class="muted">${when}</div>
                 </div>
                 <div style="text-align:right;font-weight:900;${win?'color:#0b8457':'color:#bd1a1a'}">${sign}${amount}</div>
               </div>`;
+            el.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('arch', el.dataset.key, ev.currentTarget); };
             archDiv.appendChild(el);
           });
+          document.getElementById('qArch').addEventListener('input', ()=>{}); // already attached
+          document.getElementById('qArch').dispatchEvent(new Event('input'));
         }
 
       }catch(e){
@@ -659,14 +817,6 @@ MINI_APP_HTML = """
         document.getElementById("arch").textContent = "Сетевая ошибка.";
       }
     }
-
-    // Fetch events (server renders list on first load; we re-render client side from injected data)
-    // Сервер подставляет events в шаблон — используем их для первичного рендера
-    const __events = {{ events|tojson|safe }};
-    renderEvents(__events);
-
-    // Filters after initial render
-    attachFilters();
 
     // Leaders
     document.getElementById('seg').addEventListener('click', (e)=>{
@@ -679,11 +829,10 @@ MINI_APP_HTML = """
       const lb = document.getElementById("lb-container");
       const rng= document.getElementById("lb-range");
       try{
-        let url = "/api/leaderboard?period=" + encodeURIComponent(period);
-        const r = await fetch(url);
+        const r = await fetch("/api/leaderboard?period="+encodeURIComponent(period));
         const data = await r.json();
         if (!r.ok || !data.success){ lb.textContent = "Ошибка загрузки рейтинга."; return; }
-        rng.textContent = data.week.label;
+        rng.textContent = data.week.label || '';
         const items = data.items||[];
         lb.innerHTML = items.length ? "" : "Пока нет данных.";
         items.slice(0,50).forEach((it,i)=>{
@@ -708,7 +857,7 @@ MINI_APP_HTML = """
     document.addEventListener('click',(ev)=>{
       const btn = ev.target.closest('.buy-btn'); if(!btn) return;
       buyCtx = { event_uuid:btn.dataset.event, option_index:parseInt(btn.dataset.index,10), side:btn.dataset.side, chat_id:getChatId(), text:btn.dataset.text };
-      document.getElementById('mTitle').textContent = `Покупка: ${buyCtx.side.toUpperCase()} · ${buyCtx.text}`;
+      document.getElementById('mTitle').textContent = `Покупка: ${buyCtx.side.toUpperCase()==='YES'?'ДА':buyCtx.side.toUpperCase()==='NO'?'НЕТ':buyCtx.side.toUpperCase()} · ${buyCtx.text}`;
       document.getElementById('mAmount').value="100";
       document.getElementById('modalBg').style.display='flex';
       if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
@@ -848,7 +997,6 @@ def api_me():
         return jsonify(success=False, error="not_approved"), 403
     positions = db.get_user_positions(chat_id)
     archive = db.get_user_archive(chat_id)
-    # вернём login, чтобы в шапке отрисовать ник
     return jsonify(success=True, user={"chat_id": chat_id, "balance": float(u.get("balance", 0)), "login": u.get("login")}, positions=positions, archive=archive)
 
 
@@ -935,3 +1083,88 @@ def api_leaderboard():
         bounds = db.week_current_bounds()
         items = db.get_leaderboard_week(bounds["start"], limit=50)
         return jsonify(success=True, week=bounds, items=items)
+
+
+# ---------- Market history (for charts) ----------
+@app.get("/api/market/history")
+def api_market_history():
+    """
+    Возвращает точки истории цены ДА для конкретного рынка (event_uuid + option_index).
+    Расчёт по market_orders с проигрыванием AMM (x*y=k) от стартовых резервов 1000/1000.
+    Параметры: event_uuid, option_index, range: 1h|6h|1d|1w|1m|all
+    """
+    event_uuid = request.args.get("event_uuid", type=str)
+    option_index = request.args.get("option_index", type=int)
+    rng = (request.args.get("range") or "1d").lower()
+
+    if not event_uuid or option_index is None:
+        return jsonify(success=False, error="bad_params"), 400
+
+    try:
+        # 1) найти market_id и константу
+        m = (
+            db.client.table("prediction_markets")
+            .select("id, constant_product, created_at")
+            .eq("event_uuid", event_uuid)
+            .eq("option_index", option_index)
+            .single()
+            .execute()
+        ).data
+        if not m:
+            return jsonify(success=False, error="market_not_found"), 404
+        market_id = int(m["id"])
+        k = float(m.get("constant_product") or 1_000_000.0)
+        # стартовые резервы
+        y = (k ** 0.5)
+        n = (k ** 0.5)
+
+        # 2) временной диапазон
+        now = datetime.now(timezone.utc)
+        dt_map = {
+            "1h": now - timedelta(hours=1),
+            "6h": now - timedelta(hours=6),
+            "1d": now - timedelta(days=1),
+            "1w": now - timedelta(weeks=1),
+            "1m": now - timedelta(days=30),
+            "all": None,
+        }
+        since = dt_map.get(rng, now - timedelta(days=1))
+        # 3) забрать приказы
+        q = db.client.table("market_orders").select("order_type, amount, created_at").eq("market_id", market_id).order("created_at", desc=False)
+        if since:
+            q = q.gte("created_at", since.isoformat())
+        orders = q.execute().data or []
+
+        # 4) проиграть историю
+        points = []
+        # стартовая точка: либо создан, либо самая ранняя видимая
+        if since:
+            points.append({
+                "ts": since.isoformat(),
+                "yes_price": n/(y+n) if (y+n)>0 else 0.5
+            })
+        else:
+            points.append({
+                "ts": (m.get("created_at") or datetime.now(timezone.utc).isoformat()),
+                "yes_price": n/(y+n) if (y+n)>0 else 0.5
+            })
+
+        for o in orders:
+            side = o["order_type"]
+            amt = float(o["amount"])
+            if side == "yes":
+                n = n + amt
+                y = k / n
+            else:
+                y = y + amt
+                n = k / y
+            price_yes = n/(y+n) if (y+n)>0 else 0.5
+            points.append({
+                "ts": o["created_at"],
+                "yes_price": price_yes
+            })
+
+        return jsonify(success=True, points=points)
+    except Exception as e:
+        print("[api_market_history] error:", e)
+        return jsonify(success=False, error="server_error"), 500
