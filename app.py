@@ -87,6 +87,7 @@ def _init_once():
 
 
 def make_sig(chat_id: int) -> str:
+    # Без секрета Mini App запрещён
     if not WEBAPP_SIGNING_SECRET:
         return ""
     msg = str(chat_id).encode()
@@ -113,7 +114,6 @@ def verify_telegram_init_data(init_data: str, max_age: int = 86400):
         return None, "no_init"
 
     if not TOKEN:
-        # Без токена проверить нельзя — считаем ошибкой, если init передан
         return None, "no_token"
 
     try:
@@ -219,6 +219,7 @@ def index():
 # ---------- Telegram webhook: только /start ----------
 @app.post("/webhook")
 def telegram_webhook():
+    # Проверка секрета Telegram
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if TELEGRAM_SECRET_TOKEN and secret != TELEGRAM_SECRET_TOKEN:
         return "forbidden", 403
@@ -235,20 +236,23 @@ def telegram_webhook():
     user = db.get_user(chat_id)
     status = (user or {}).get("status")
 
+    # Разрешаем только /start, остальное игнорируем
     if text == "/start":
         if not user:
+            # Нет в базе — просим ввести логин одним сообщением
             send_message(
                 chat_id,
                 "Добро пожаловать! Напишите ваш желаемый логин одним сообщением. После модерации получите доступ к приложению."
             )
         else:
             if status == "approved":
+                # Одобрен — сразу даём кнопку Mini App
                 sig = make_sig(chat_id)
                 if not sig:
                     send_message(chat_id, "Сервис временно недоступен. Повторите позже.")
                     return "ok"
                 web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]}
+                kb = { "inline_keyboard": [ [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}] ] }
                 send_message(chat_id, "Приложение готово. Открывайте:", kb)
             elif status == "pending":
                 send_message(chat_id, "⏳ Ваша заявка на регистрацию ожидает проверки администратором.")
@@ -260,6 +264,7 @@ def telegram_webhook():
                 send_message(chat_id, "Напишите ваш логин одним сообщением для регистрации.")
         return "ok"
 
+    # Любой текст НЕ команда: если нет пользователя — трактуем как логин, если в pending — просто уведомляем
     if not text.startswith("/"):
         if not user:
             new_user = db.create_user(chat_id, text, username)
@@ -277,6 +282,7 @@ def telegram_webhook():
                 send_message(chat_id, "🚫 Доступ запрещён.")
         return "ok"
 
+    # Любые другие /команды игнорируем
     return "ok"
 
 
@@ -296,6 +302,7 @@ MINI_APP_HTML = """
     .opt-title { display:flex; align-items:center; font-weight: 700; }
     .btn  { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-size: 15px; font-weight: 700;
             transition: background-color .18s ease, color .18s ease; min-width: 92px; min-height: 42px; }
+    /* Мягкие фоны (без alpha). На hover — насыщенный фон, текст — бледный в тон исходному фону */
     .yes  { background: #CDEAD2; color: #2e7d32; }
     .no   { background: #F3C7C7; color: #c62828; }
     .yes:hover { background: #2e7d32; color: #CDEAD2; }
@@ -312,6 +319,7 @@ MINI_APP_HTML = """
     .collapsed .caret { transform: rotate(-90deg); }
     .section-body { padding:10px 0 0 0; }
     .prob { color:#000; font-weight:800; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
+    /* top bar */
     .topbar { display:flex; justify-content:center; align-items:center; flex-direction:column; }
     .avatar-wrap { position: relative; width: 86px; height: 86px; }
     .avatar { width: 86px; height: 86px; border-radius: 50%; border: 2px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
@@ -319,17 +327,20 @@ MINI_APP_HTML = """
     .avatar.ph  { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:28px; color:#fff;
                   background: radial-gradient(circle at 30% 30%, #6a5acd, #00bcd4); letter-spacing: 1px; text-transform: uppercase; }
     .balance { text-align:center; font-weight:900; font-size:22px; margin: 10px 0 18px; }
+    /* modal */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
     .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
     .modal h3 { margin:0 0 8px 0; }
     .modal .row { justify-content: flex-start; }
     input[type=number] { padding:8px; width: 140px; }
+    /* active bets */
     .bet { display:flex; align-items:center; justify-content:space-between; gap:12px; }
     .bet-info { flex: 1 1 auto; }
     .bet-win { flex: 0 0 auto; text-align:right; }
     .win-val { font-size:22px; font-weight:900; color:#0b8457; line-height:1.1; }
     .win-sub { font-size:12px; color:#666; }
     .unit { font-size:12px; font-weight:700; color:#444; margin-left:2px; }
+    /* leaderboard */
     .lb-head { text-align:center; font-weight:700; margin:6px 0 10px; }
     .seg { display:inline-flex; background:#f0f0f0; border-radius:999px; padding:4px; gap:4px; }
     .seg-btn { border:0; background:transparent; padding:6px 12px; border-radius:999px; font-weight:700; cursor:pointer; color:#444; transition:all .15s ease; }
@@ -344,6 +355,7 @@ MINI_APP_HTML = """
 </head>
 <body>
 
+  <!-- Аватар/инициалы и баланс -->
   <div class="topbar">
     <div class="avatar-wrap">
       <div id="avatarPH" class="avatar ph">U</div>
@@ -352,6 +364,7 @@ MINI_APP_HTML = """
   </div>
   <div id="balance" class="balance">Баланс: —</div>
 
+  <!-- Активные ставки -->
   <div id="wrap-active" class="section" style="margin-top:22px;">
     <div id="head-active" class="section-head" onclick="toggleSection('active')">
       <span class="section-title">Активные ставки</span>
@@ -362,6 +375,7 @@ MINI_APP_HTML = """
     </div>
   </div>
 
+  <!-- Мероприятия -->
   <div id="wrap-events" class="section">
     <div id="head-events" class="section-head" onclick="toggleSection('events')">
       <span class="section-title">Мероприятия</span>
@@ -413,6 +427,7 @@ MINI_APP_HTML = """
     </div>
   </div>
 
+  <!-- Таблица лидеров -->
   <div id="wrap-leaders" class="section">
     <div id="head-leaders" class="section-head" onclick="toggleLeaders()">
       <span class="section-title">Таблица лидеров</span>
@@ -432,6 +447,7 @@ MINI_APP_HTML = """
     </div>
   </div>
 
+  <!-- Modal -->
   <div id="modalBg" class="modal-bg">
     <div class="modal">
       <h3 id="mTitle">Покупка</h3>
@@ -455,7 +471,7 @@ MINI_APP_HTML = """
     const qs = new URLSearchParams(location.search);
     const CHAT_ID = qs.get("chat_id");
     const SIG = qs.get("sig") || "";
-    const INIT = tg && tg.initData ? tg.initData : ""; // добавлено: пересылаем на сервер
+    const INIT = tg && tg.initData ? tg.initData : ""; // initData для серверной проверки
 
     function getChatId() {
       if (CHAT_ID) return CHAT_ID;
@@ -618,7 +634,7 @@ MINI_APP_HTML = """
       });
     }
 
-    // hover: вероятность
+    // hover: подмена текста на вероятность
     document.addEventListener('mouseenter', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
@@ -634,7 +650,7 @@ MINI_APP_HTML = """
       btn.textContent = label;
     }, true);
 
-    // ---- лидеры ----
+    // ---- лидеры неделя/месяц ----
     let currentPeriod = 'week';
     function bindSeg() {
       const seg = document.getElementById('seg');
@@ -651,10 +667,10 @@ MINI_APP_HTML = """
     }
 
     async function fetchLeaderboard(period='week') {
-      const cid = getChatId();
       const lb = document.getElementById("lb-container");
       try {
         let url = "/api/leaderboard?period=" + encodeURIComponent(period);
+        const cid = getChatId();
         if (cid)  url += `&viewer=${cid}`;
         if (INIT) url += `&init=${encodeURIComponent(INIT)}`;
         const r = await fetch(url);
@@ -751,12 +767,14 @@ MINI_APP_HTML = """
 
     window.openBuy = openBuy; window.confirmBuy = confirmBuy; window.closeBuy = closeBuy;
 
+    // Инициализация
     (function init(){
       if (tg) tg.ready();
       applySavedCollapses();
       setAvatar();
       fetchMe();
       bindSeg();
+      // Лидеров грузим при первом раскрытии
     })();
   </script>
 </body>
@@ -778,7 +796,7 @@ def _format_end_short(end_iso: str) -> str:
 
 @app.get("/mini-app")
 def mini_app():
-    # Для показа страницы по-прежнему требуем chat_id+sig (как раньше), чтобы без Telegram WebView нельзя было зайти
+    # Жёсткий доступ: нужен chat_id + sig + статус approved (и не banned)
     chat_id = request.args.get("chat_id", type=int)
     sig = request.args.get("sig", "")
     if not chat_id or not sig or not verify_sig(chat_id, sig):
@@ -790,6 +808,7 @@ def mini_app():
     if user.get("status") == "banned":
         return Response("<h3>Доступ запрещён</h3>", mimetype="text/html")
 
+    # Данные для шаблона
     events = db.get_published_events()
     for e in events:
         end_iso = str(e.get("end_date", ""))
@@ -802,26 +821,24 @@ def mini_app():
             no = float(m["total_no_reserve"])
             total = yes + no
             yp = (no / total) if total > 0 else 0.5
-            volume = max(0.0, total - 2000.0)
+            volume = max(0.0, total - 2000.0)  # «заведённые» кредиты в пул сверх стартовых
             markets[m["option_index"]] = {"yes_price": yp, "volume": volume, "end_short": e["end_short"]}
         e["markets"] = markets
 
     return render_template_string(MINI_APP_HTML, events=events, enumerate=enumerate)
 
 
-# ---------- API ----------
+# ---------- API (используют initData или SIG) ----------
 @app.get("/api/me")
 def api_me():
     chat_id, err = auth_chat_id_from_request()
     if err:
         return jsonify(success=False, error=err), 403
-
     u = db.get_user(chat_id)
     if not u:
         return jsonify(success=False, error="user_not_found"), 404
     if u.get("status") != "approved":
         return jsonify(success=False, error="not_approved"), 403
-
     positions = db.get_user_positions(chat_id)
     return jsonify(success=True, user={"chat_id": chat_id, "balance": u.get("balance", 0)}, positions=positions)
 
@@ -894,7 +911,6 @@ def api_userpic():
 
 @app.get("/api/leaderboard")
 def api_leaderboard():
-    # Лидерборд публичен; init можно игнорировать, но он теперь приходит — это ок
     period = (request.args.get("period") or "week").lower()
     if period == "month":
         bounds = db.month_current_bounds()
@@ -978,7 +994,7 @@ async function adminPost(url, data){
         <div class="row">Изменить баланс:
           <input type="number" id="b{{u.chat_id}}" value="{{u.balance}}" style="width:120px;">
           <button class="btn save" onclick="
-            adminPost('/admin/update_balance/{{u.chat_id}}',{balance: parseInt(document.getElementById('b{{u.chat_id}}').value||0)})
+            adminPost('/admin/update_balance/{{u.chat_id}}',{balance: parseFloat(document.getElementById('b{{u.chat_id}}').value||0)})
             .then(()=>location.reload())
           ">Сохранить</button>
         </div>
@@ -1030,10 +1046,11 @@ def admin_panel():
 def admin_approve(chat_id: int):
     user = db.approve_user(chat_id)
     if user:
+        # Отправим пользователю кнопку Mini App
         sig = make_sig(chat_id)
         if sig:
             web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-            kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]}
+            kb = { "inline_keyboard": [ [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}] ] }
             send_message(chat_id, "✅ Ваша регистрация подтверждена! Добро пожаловать.", kb)
         return jsonify(success=True)
     return jsonify(success=False), 404
@@ -1049,15 +1066,19 @@ def admin_reject(chat_id: int):
 @app.post("/admin/update_balance/<int:chat_id>")
 @requires_auth
 def admin_update_balance(chat_id: int):
-    payload = request.get_json(silent=True) or {}
+    # Принимаем JSON (fetch из админки) или form (если пошлёте из формы)
+    payload = request.get_json(silent=True) or request.form or {}
     new_balance = payload.get("balance")
+
     try:
-        new_balance = int(new_balance)
+        new_balance = float(new_balance)
         if new_balance < 0:
             raise ValueError
     except Exception:
         return jsonify(success=False, error="bad_balance"), 400
-    user = db.update_user_balance(chat_id, new_balance)
+
+    # Бухгалтерская корректировка через ledger + кэш users.balance
+    user = db.admin_set_balance_via_ledger(chat_id, new_balance)
     return jsonify(success=bool(user))
 
 
