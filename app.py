@@ -4,7 +4,7 @@ import uuid
 import hmac
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import parse_qsl
 
 import requests
@@ -87,7 +87,6 @@ def _init_once():
 
 
 def make_sig(chat_id: int) -> str:
-    # Без секрета Mini App запрещён
     if not WEBAPP_SIGNING_SECRET:
         return ""
     msg = str(chat_id).encode()
@@ -102,52 +101,32 @@ def verify_sig(chat_id: int, sig: str) -> bool:
 
 # ---------- WebApp initData verification ----------
 def verify_telegram_init_data(init_data: str, max_age: int = 86400):
-    """
-    Проверка подписи initData по правилам Telegram:
-    1) data_check_string = соединяем "key=value" (кроме hash), ключи отсортированы по алфавиту, через \n
-    2) secret_key = HMAC_SHA256("WebAppData", BOT_TOKEN)
-    3) expected_hash = HMAC_SHA256(data_check_string, secret_key) в hex
-    4) Сравнить expected_hash с hash из initData и проверить auth_date не старше max_age секунд
-    Возвращает (payload_dict, None) при успехе, либо (None, "error").
-    """
     if not init_data:
         return None, "no_init"
-
     if not TOKEN:
         return None, "no_token"
-
     try:
         pairs = dict(parse_qsl(init_data, keep_blank_values=True))
         recv_hash = (pairs.pop("hash", "") or "").lower()
         if not recv_hash:
             return None, "no_hash"
-
-        # Возраст
         try:
             auth_date = int(pairs.get("auth_date", "0") or "0")
         except Exception:
             return None, "bad_auth_date"
         if auth_date <= 0 or (int(time.time()) - auth_date) > max_age:
             return None, "stale"
-
-        # data_check_string
         data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs.keys()))
-
-        # secret_key = HMAC_SHA256("WebAppData", bot_token)
         secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
         expected = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
         if not hmac.compare_digest(expected, recv_hash):
             return None, "bad_hash"
-
-        # Распарсим user (если есть)
         user = {}
         if "user" in pairs and pairs["user"]:
             try:
                 user = json.loads(pairs["user"])
             except Exception:
                 user = {}
-
         payload = {
             "auth_date": auth_date,
             "query_id": pairs.get("query_id"),
@@ -162,19 +141,12 @@ def verify_telegram_init_data(init_data: str, max_age: int = 86400):
 
 
 def auth_chat_id_from_request():
-    """
-    Если клиент прислал init (из Telegram WebApp), мы ОБЯЗАТЕЛЬНО валидируем его и берём chat_id из user.id.
-    Если init отсутствует — падаем назад на проверку SIG (ваша текущая схема).
-    Также, если клиент одновременно прислал chat_id и init, сверяем их равенство.
-    Возвращаем (chat_id, None) при успехе или (None, error).
-    """
     init_str = request.args.get("init")
     payload = None
     if request.method in ("POST", "PUT", "PATCH"):
         payload = request.get_json(silent=True) or {}
         if not init_str:
             init_str = payload.get("init")
-
     if init_str:
         info, err = verify_telegram_init_data(init_str)
         if err:
@@ -182,7 +154,6 @@ def auth_chat_id_from_request():
         user_id = info.get("user_id")
         if not user_id:
             return None, "bad_init:no_user"
-        # Если вместе с init передали chat_id — сверим
         chat_id_param = request.args.get("chat_id", type=int)
         if chat_id_param is None and payload:
             try:
@@ -192,14 +163,11 @@ def auth_chat_id_from_request():
         if chat_id_param is not None and chat_id_param != user_id:
             return None, "chat_id_mismatch"
         return user_id, None
-
-    # Fallback: старая схема SIG
     chat_id = request.args.get("chat_id", type=int)
     sig = request.args.get("sig", "")
     if payload:
         chat_id = chat_id if chat_id is not None else (int(payload.get("chat_id")) if payload.get("chat_id") else None)
         sig = sig or (payload.get("sig") or "")
-
     if not chat_id or not verify_sig(chat_id, sig):
         return None, "bad_sig"
     return chat_id, None
@@ -219,7 +187,6 @@ def index():
 # ---------- Telegram webhook: только /start ----------
 @app.post("/webhook")
 def telegram_webhook():
-    # Проверка секрета Telegram
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if TELEGRAM_SECRET_TOKEN and secret != TELEGRAM_SECRET_TOKEN:
         return "forbidden", 403
@@ -236,17 +203,14 @@ def telegram_webhook():
     user = db.get_user(chat_id)
     status = (user or {}).get("status")
 
-    # Разрешаем только /start, остальное игнорируем
     if text == "/start":
         if not user:
-            # Нет в базе — просим ввести логин одним сообщением
             send_message(
                 chat_id,
                 "Добро пожаловать! Напишите ваш желаемый логин одним сообщением. После модерации получите доступ к приложению."
             )
         else:
             if status == "approved":
-                # Одобрен — сразу даём кнопку Mini App
                 sig = make_sig(chat_id)
                 if not sig:
                     send_message(chat_id, "Сервис временно недоступен. Повторите позже.")
@@ -264,7 +228,6 @@ def telegram_webhook():
                 send_message(chat_id, "Напишите ваш логин одним сообщением для регистрации.")
         return "ok"
 
-    # Любой текст НЕ команда: если нет пользователя — трактуем как логин, если в pending — просто уведомляем
     if not text.startswith("/"):
         if not user:
             new_user = db.create_user(chat_id, text, username)
@@ -282,7 +245,6 @@ def telegram_webhook():
                 send_message(chat_id, "🚫 Доступ запрещён.")
         return "ok"
 
-    # Любые другие /команды игнорируем
     return "ok"
 
 
@@ -302,7 +264,6 @@ MINI_APP_HTML = """
     .opt-title { display:flex; align-items:center; font-weight: 700; }
     .btn  { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-size: 15px; font-weight: 700;
             transition: background-color .18s ease, color .18s ease; min-width: 92px; min-height: 42px; }
-    /* Мягкие фоны (без alpha). На hover — насыщенный фон, текст — бледный в тон исходному фону */
     .yes  { background: #CDEAD2; color: #2e7d32; }
     .no   { background: #F3C7C7; color: #c62828; }
     .yes:hover { background: #2e7d32; color: #CDEAD2; }
@@ -389,13 +350,20 @@ MINI_APP_HTML = """
             <p>{{ e.description }}</p>
 
             {% for idx, opt in enumerate(e.options) %}
-              {% set md = e.markets.get(idx, {'yes_price': 0.5, 'volume': 0, 'end_short': e.end_short}) %}
+              {% set md = e.markets.get(idx, {'yes_price': 0.5, 'volume': 0, 'end_short': e.end_short, 'resolved': false, 'winner_side': None}) %}
               {% set yes_pct = ('%.0f' % (md.yes_price * 100)) %}
               {% set no_pct  = ('%.0f' % ((1 - md.yes_price) * 100)) %}
               <div class="opt" data-option="{{ idx }}">
                 <div class="opt-title">{{ opt.text }}</div>
-                <div class="prob" title="Вероятность ДА">{{ yes_pct }}%</div>
+                <div class="prob" title="Вероятность ДА">
+                  {% if md.resolved %}
+                    {{ 'YES' if md.winner_side=='yes' else 'NO' }} ✓
+                  {% else %}
+                    {{ yes_pct }}%
+                  {% endif %}
+                </div>
                 <div class="actions">
+                  {% if not md.resolved %}
                   <button class="btn yes buy-btn"
                           data-event="{{ e.event_uuid }}"
                           data-index="{{ idx }}"
@@ -409,6 +377,9 @@ MINI_APP_HTML = """
                           data-side="no"
                           data-prob="{{ no_pct }}"
                           data-text="{{ opt.text|e }}">НЕТ</button>
+                  {% else %}
+                  <button class="btn yes" disabled>Закрыт</button>
+                  {% endif %}
                 </div>
                 <div class="meta-left">
                   {% set vol = (md.volume or 0) | int %}
@@ -471,7 +442,7 @@ MINI_APP_HTML = """
     const qs = new URLSearchParams(location.search);
     const CHAT_ID = qs.get("chat_id");
     const SIG = qs.get("sig") || "";
-    const INIT = tg && tg.initData ? tg.initData : ""; // initData для серверной проверки
+    const INIT = tg && tg.initData ? tg.initData : "";
 
     function getChatId() {
       if (CHAT_ID) return CHAT_ID;
@@ -514,7 +485,6 @@ MINI_APP_HTML = """
       }
     }
 
-    // Секции
     function toggleSection(name) {
       const body = document.getElementById("section-" + name);
       const caret = document.getElementById("caret-" + name);
@@ -564,7 +534,6 @@ MINI_APP_HTML = """
       });
     }
 
-    // Баланс и активные позиции
     async function fetchMe() {
       const cid = getChatId();
       const activeDiv = document.getElementById("active");
@@ -634,7 +603,7 @@ MINI_APP_HTML = """
       });
     }
 
-    // hover: подмена текста на вероятность
+    // hover: вероятность на кнопках ДА/НЕТ
     document.addEventListener('mouseenter', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
@@ -650,7 +619,7 @@ MINI_APP_HTML = """
       btn.textContent = label;
     }, true);
 
-    // ---- лидеры неделя/месяц ----
+    // Лидеры
     let currentPeriod = 'week';
     function bindSeg() {
       const seg = document.getElementById('seg');
@@ -767,14 +736,12 @@ MINI_APP_HTML = """
 
     window.openBuy = openBuy; window.confirmBuy = confirmBuy; window.closeBuy = closeBuy;
 
-    // Инициализация
     (function init(){
       if (tg) tg.ready();
       applySavedCollapses();
       setAvatar();
       fetchMe();
       bindSeg();
-      // Лидеров грузим при первом раскрытии
     })();
   </script>
 </body>
@@ -796,7 +763,6 @@ def _format_end_short(end_iso: str) -> str:
 
 @app.get("/mini-app")
 def mini_app():
-    # Жёсткий доступ: нужен chat_id + sig + статус approved (и не banned)
     chat_id = request.args.get("chat_id", type=int)
     sig = request.args.get("sig", "")
     if not chat_id or not sig or not verify_sig(chat_id, sig):
@@ -813,22 +779,27 @@ def mini_app():
     for e in events:
         end_iso = str(e.get("end_date", ""))
         e["end_short"] = _format_end_short(end_iso)
-
-        mk = db.get_markets_for_event(e["event_uuid"])
+        mk = db.get_markets_for_event(e["event_uuid"])  # ожидаются поля resolved/winner_side
         markets = {}
         for m in mk:
             yes = float(m["total_yes_reserve"])
             no = float(m["total_no_reserve"])
             total = yes + no
             yp = (no / total) if total > 0 else 0.5
-            volume = max(0.0, total - 2000.0)  # «заведённые» кредиты в пул сверх стартовых
-            markets[m["option_index"]] = {"yes_price": yp, "volume": volume, "end_short": e["end_short"]}
+            volume = max(0.0, total - 2000.0)
+            markets[m["option_index"]] = {
+                "yes_price": yp,
+                "volume": volume,
+                "end_short": e["end_short"],
+                "resolved": bool(m.get("resolved")) if isinstance(m, dict) else False,
+                "winner_side": m.get("winner_side") if isinstance(m, dict) else None,
+            }
         e["markets"] = markets
 
     return render_template_string(MINI_APP_HTML, events=events, enumerate=enumerate)
 
 
-# ---------- API (используют initData или SIG) ----------
+# ---------- API ----------
 @app.get("/api/me")
 def api_me():
     chat_id, err = auth_chat_id_from_request()
@@ -942,8 +913,13 @@ h1{margin:0 0 12px;}
 .ban{background:#c62828;color:#fff;}
 .unban{background:#6a5acd;color:#fff;}
 .save{background:#1976d2;color:#fff;}
+resolve{background:#6a5acd;color:#fff;}
 small{color:#666;}
 .list{display:flex;flex-direction:column;gap:6px;}
+table{width:100%;border-collapse:collapse;}
+td,th{padding:6px;border-bottom:1px solid #eee;text-align:left;font-size:14px;}
+th{font-weight:700;color:#333;}
+.muted{color:#666;}
 </style>
 <script>
 function toggleBody(id){
@@ -952,8 +928,13 @@ function toggleBody(id){
 }
 async function adminPost(url, data){
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data||{})});
-  if(!r.ok){alert('Ошибка'); return null;}
+  if(!r.ok){const t=await r.text(); alert('Ошибка: ' + t); return null;}
   return await r.json().catch(()=>null);
+}
+async function resolveMarket(mid, winner){
+  const ok = await adminPost('/admin/resolve_market/' + mid, {winner});
+  if(ok && ok.success){ alert('Рынок закрыт: ' + winner.toUpperCase()); location.reload(); }
+  else { alert('Ошибка резолва: ' + ((ok && ok.error) || '')); }
 }
 </script>
 </head>
@@ -1008,6 +989,40 @@ async function adminPost(url, data){
 </div>
 
 <div class="section">
+  <h2>Рынки (открытые)</h2>
+  <table>
+    <thead>
+      <tr><th>Событие</th><th>Опция</th><th>YES%</th><th class="muted">Закрывается</th><th>Действия</th></tr>
+    </thead>
+    <tbody>
+    {% for e in events %}
+      {% for mk in e.open_markets %}
+        <tr>
+          <td>{{ e.name }}</td>
+          <td>{{ mk.option_text }}</td>
+          <td>
+            {% set yes_pct = ('%.0f' % ((mk.total_no_reserve / (mk.total_yes_reserve + mk.total_no_reserve)) * 100)) if (mk.total_yes_reserve + mk.total_no_reserve) > 0 else '50' %}
+            {{ yes_pct }}%
+          </td>
+          <td class="muted">{{ mk.end_short }}</td>
+          <td>
+            {% if mk.can_resolve %}
+              <button class="btn unban" onclick="resolveMarket({{ mk.id }}, 'yes')">Закрыть YES</button>
+              <button class="btn ban"  onclick="resolveMarket({{ mk.id }}, 'no')">Закрыть NO</button>
+            {% else %}
+              <button class="btn unban" disabled title="Доступно после {{ mk.end_short }}">Закрыть YES</button>
+              <button class="btn ban"  disabled title="Доступно после {{ mk.end_short }}">Закрыть NO</button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="muted">Кнопки активируются автоматически после наступления времени окончания события.</div>
+</div>
+
+<div class="section">
   <h2>Забаненные ({{ banned|length }})</h2>
   <div class="list">
   {% for u in banned %}
@@ -1037,16 +1052,68 @@ def admin_panel():
     pending = db.get_pending_users()
     approved = db.get_approved_users()
     banned = db.get_banned_users()
-    return render_template_string(ADMIN_HTML, pending=pending, approved=approved, banned=banned)
+
+    # Список открытых рынков по событиям; кнопки активны только после end_date
+    admin_events = []
+    now_utc = datetime.now(timezone.utc)
+    events = db.get_published_events()
+    for e in events:
+        mk = db.get_markets_for_event(e["event_uuid"])
+        open_mk = []
+        for m in mk:
+            if bool(m.get("resolved")):
+                continue
+            # подтянем текст опции
+            opt_text = "—"
+            try:
+                idx = int(m["option_index"])
+                opts = e.get("options") or []
+                if isinstance(opts, list) and 0 <= idx < len(opts):
+                    o = opts[idx]
+                    opt_text = o.get("text") if isinstance(o, dict) else str(o)
+            except Exception:
+                pass
+            # проверим наступление времени
+            end_dt = e.get("end_date")
+            can_resolve = False
+            end_short = ""
+            try:
+                if isinstance(end_dt, str):
+                    # Supabase возвращает ISO-строку
+                    edt = datetime.fromisoformat(end_dt.replace(" ", "T").split("+")[0]).replace(tzinfo=timezone.utc)
+                else:
+                    edt = end_dt
+                can_resolve = edt is not None and now_utc >= edt
+                end_short = _format_end_short(str(end_dt))
+            except Exception:
+                end_short = _format_end_short(str(end_dt))
+            open_mk.append({
+                "id": int(m["id"]),
+                "option_text": opt_text,
+                "total_yes_reserve": float(m["total_yes_reserve"]),
+                "total_no_reserve": float(m["total_no_reserve"]),
+                "end_short": end_short,
+                "can_resolve": can_resolve
+            })
+        if open_mk:
+            admin_events.append({
+                "name": e["name"],
+                "open_markets": open_mk
+            })
+
+    return render_template_string(ADMIN_HTML,
+                                  pending=pending,
+                                  approved=approved,
+                                  banned=banned,
+                                  events=admin_events)
 
 
-# Действия админа
+# ---- Admin actions ----
 @app.post("/admin/approve/<int:chat_id>")
 @requires_auth
 def admin_approve(chat_id: int):
     user = db.approve_user(chat_id)
     if user:
-        # Отправим пользователю кнопку Mini App
         sig = make_sig(chat_id)
         if sig:
             web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
@@ -1066,18 +1133,14 @@ def admin_reject(chat_id: int):
 @app.post("/admin/update_balance/<int:chat_id>")
 @requires_auth
 def admin_update_balance(chat_id: int):
-    # Принимаем JSON (fetch из админки) или form (если пошлёте из формы)
     payload = request.get_json(silent=True) or request.form or {}
     new_balance = payload.get("balance")
-
     try:
         new_balance = float(new_balance)
         if new_balance < 0:
             raise ValueError
     except Exception:
         return jsonify(success=False, error="bad_balance"), 400
-
-    # Бухгалтерская корректировка через ledger + кэш users.balance
     user = db.admin_set_balance_via_ledger(chat_id, new_balance)
     return jsonify(success=bool(user))
 
@@ -1094,6 +1157,25 @@ def admin_ban(chat_id: int):
 def admin_unban(chat_id: int):
     user = db.unban_user(chat_id)
     return jsonify(success=bool(user))
+
+
+@app.post("/admin/resolve_market/<int:market_id>")
+@requires_auth
+def admin_resolve_market(market_id: int):
+    payload = request.get_json(silent=True) or {}
+    winner = (payload.get("winner") or "").lower()
+    if winner not in ("yes", "no"):
+        return jsonify(success=False, error="bad_winner"), 400
+
+    # Серверная проверка: можно резолвить только после end_date
+    ok_time, err_time = db.market_can_resolve(market_id)
+    if not ok_time:
+        return jsonify(success=False, error=err_time or "too_early"), 400
+
+    res, err = db.resolve_market_by_id(market_id, winner)
+    if err:
+        return jsonify(success=False, error=err), 400
+    return jsonify(success=True, summary=res)
 
 
 if __name__ == "__main__":
