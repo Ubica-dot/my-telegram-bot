@@ -1,4 +1,5 @@
 import os
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,6 +106,19 @@ class Database:
         except Exception:
             return False
 
+    def get_user_balance(self, chat_id: int) -> float:
+        try:
+            r = (
+                self.client.table("users")
+                .select("balance")
+                .eq("chat_id", chat_id)
+                .single()
+                .execute()
+            )
+            return _to_float(r.data["balance"]) if r.data else 0.0
+        except Exception:
+            return 0.0
+
     def get_pending_users(self) -> List[dict]:
         try:
             r = (
@@ -144,20 +158,49 @@ class Database:
         except Exception:
             return []
 
-    def get_user_balance(self, chat_id: int) -> float:
+    # Поиск/фильтр/сортировка пользователей для админки
+    def search_users(self, status: str, q: str = "", sort: str = "") -> List[dict]:
+        try:
+            sel = "chat_id, login, username, status, created_at, approved_at, balance"
+            query = self.client.table("users").select(sel).eq("status", status)
+            if q:
+                qq = q.strip()
+                if qq.isdigit():
+                    query = query.eq("chat_id", int(qq))
+                else:
+                    query = query.ilike("login", f"%{qq}%")
+            if sort == "created_at":
+                query = query.order("created_at", desc=False)
+            elif sort == "balance":
+                query = query.order("balance", desc=True)
+            else:
+                # по умолчанию: для approved — по дате одобрения, иначе — по дате создания
+                if status == "approved":
+                    query = query.order("approved_at", desc=True)
+                else:
+                    query = query.order("created_at", desc=False)
+            r = query.limit(500).execute()
+            return r.data or []
+        except Exception as e:
+            print("[search_users] error:", e)
+            return []
+
+    # История из ledger
+    def get_ledger_for_user(self, chat_id: int, limit: int = 20) -> List[dict]:
         try:
             r = (
-                self.client.table("users")
-                .select("balance")
+                self.client.table("ledger")
+                .select("delta, reason, order_id, created_at")
                 .eq("chat_id", chat_id)
-                .single()
+                .order("created_at", desc=True)
+                .limit(limit)
                 .execute()
             )
-            return _to_float(r.data["balance"]) if r.data else 0.0
+            return r.data or []
         except Exception:
-            return 0.0
+            return []
 
-    # бухгалтерская корректировка + кэш
+    # Бухгалтерская корректировка + кэш
     def admin_set_balance_via_ledger(self, chat_id: int, new_balance: float) -> Optional[dict]:
         try:
             cur = self.get_user_balance(chat_id)
@@ -177,22 +220,34 @@ class Database:
             print("[admin_set_balance_via_ledger] error:", e)
             return None
 
+    # Совместимость со старым вызовом
     def update_user_balance(self, chat_id: int, new_balance: float) -> Optional[dict]:
         return self.admin_set_balance_via_ledger(chat_id, new_balance)
 
     # ---------------- EVENTS / MARKETS ----------------
     def get_published_events(self) -> List[dict]:
         try:
+            # пробуем включить tags, если колонка есть
             r = (
                 self.client.table("events")
-                .select("event_uuid, name, description, options, end_date, is_published, created_at")
+                .select("event_uuid, name, description, options, end_date, is_published, created_at, tags")
                 .eq("is_published", True)
                 .order("created_at", desc=True)
                 .execute()
             )
             return r.data or []
         except Exception:
-            return []
+            try:
+                r = (
+                    self.client.table("events")
+                    .select("event_uuid, name, description, options, end_date, is_published, created_at")
+                    .eq("is_published", True)
+                    .order("created_at", desc=True)
+                    .execute()
+                )
+                return r.data or []
+            except Exception:
+                return []
 
     def get_markets_for_event(self, event_uuid: str) -> List[dict]:
         try:
@@ -232,6 +287,67 @@ class Database:
             return None
         except Exception:
             return None
+
+    # Создание события с тегами и автосозданием рынков
+    def create_event_with_markets(
+        self,
+        name: str,
+        description: str,
+        options: List[dict],
+        end_date: str,
+        tags: List[str],
+        publish: bool,
+        creator_id: Optional[int] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        try:
+            # end_date строку приводим к ISO (timestamptz)
+            try:
+                dt = datetime.fromisoformat(end_date.replace(" ", "T"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                end_iso = dt.isoformat()
+            except Exception:
+                return False, "bad_end_date"
+
+            event_uuid = uuid4().hex[:8]
+            evt = {
+                "event_uuid": event_uuid,
+                "name": name,
+                "description": description,
+                "options": options,         # [{text:...}]
+                "end_date": end_iso,
+                "is_published": bool(publish),
+                "creator_id": creator_id or None,
+            }
+            # если есть колонка tags — добавим
+            try:
+                evt_with_tags = dict(evt)
+                evt_with_tags["tags"] = tags or []
+                er = self.client.table("events").insert(evt_with_tags).execute()
+            except Exception:
+                er = self.client.table("events").insert(evt).execute()
+
+            if not er.data:
+                return False, "event_insert_failed"
+
+            # Автосоздание рынков по количеству опций
+            rows = []
+            for idx, _ in enumerate(options):
+                rows.append({
+                    "event_uuid": event_uuid,
+                    "option_index": idx,
+                    "total_yes_reserve": 1000.0,
+                    "total_no_reserve": 1000.0,
+                    "constant_product": 1000000.0,
+                })
+            mr = self.client.table("prediction_markets").insert(rows).execute()
+            if mr.data is None:
+                return False, "markets_insert_failed"
+
+            return True, None
+        except Exception as e:
+            print("[create_event_with_markets] error:", e)
+            return False, "exception"
 
     # ---------------- POSITIONS ----------------
     def get_user_positions(self, chat_id: int) -> List[dict]:
@@ -485,6 +601,91 @@ class Database:
             print("[get_leaderboard_month] error:", e)
             return []
 
+    # ---------------- ADMIN STATS ----------------
+    def get_admin_stats(self) -> Dict[str, Any]:
+        stats = {
+            "open_markets": 0,
+            "turnover_day": 0.0,
+            "turnover_week": 0.0,
+            "top_events": [],
+        }
+        try:
+            # open markets
+            try:
+                r = self.client.table("prediction_markets").select("id", count="exact").eq("resolved", False).execute()
+                stats["open_markets"] = int(r.count or (len(r.data) if r.data else 0))
+            except Exception:
+                r = self.client.table("prediction_markets").select("id", count="exact").execute()
+                stats["open_markets"] = int(r.count or (len(r.data) if r.data else 0))
+        except Exception:
+            pass
+
+        # turnover day/week
+        now = _now_utc()
+        day_dt = (now - timedelta(days=1)).isoformat()
+        week_dt = (now - timedelta(days=7)).isoformat()
+        try:
+            d = (
+                self.client.table("market_orders")
+                .select("amount, created_at")
+                .gte("created_at", day_dt)
+                .execute()
+                .data
+                or []
+            )
+            stats["turnover_day"] = float(round(sum(_to_float(x.get("amount")) for x in d), 2))
+        except Exception:
+            pass
+        try:
+            w = (
+                self.client.table("market_orders")
+                .select("amount, market_id, created_at")
+                .gte("created_at", week_dt)
+                .execute()
+                .data
+                or []
+            )
+            stats["turnover_week"] = float(round(sum(_to_float(x.get("amount")) for x in w), 2))
+
+            # top events по сумме amount за неделю
+            if w:
+                by_market: Dict[int, float] = {}
+                for x in w:
+                    mid = int(x["market_id"])
+                    by_market[mid] = by_market.get(mid, 0.0) + _to_float(x["amount"])
+                mids = list(by_market.keys())
+                mk = (
+                    self.client.table("prediction_markets")
+                    .select("id, event_uuid")
+                    .in_("id", mids)
+                    .execute()
+                    .data
+                    or []
+                )
+                event_by_mid = {int(m["id"]): m["event_uuid"] for m in mk}
+                by_event: Dict[str, float] = {}
+                for mid, vol in by_market.items():
+                    evu = event_by_mid.get(mid)
+                    if evu:
+                        by_event[evu] = by_event.get(evu, 0.0) + vol
+                if by_event:
+                    evs = (
+                        self.client.table("events")
+                        .select("event_uuid, name")
+                        .in_("event_uuid", list(by_event.keys()))
+                        .execute()
+                        .data
+                        or []
+                    )
+                    name_by_evu = {e["event_uuid"]: e["name"] for e in evs}
+                    items = [{"name": name_by_evu.get(evu, evu), "volume": v} for evu, v in by_event.items()]
+                    items.sort(key=lambda x: x["volume"], reverse=True)
+                    stats["top_events"] = items[:10]
+        except Exception as e:
+            print("[get_admin_stats] error:", e)
+
+        return stats
+
     # ---------------- TRADING (RPC) ----------------
     def trade_buy(
         self, chat_id: int, event_uuid: str, option_index: int, side: str, amount: float
@@ -550,7 +751,6 @@ class Database:
             if not end_date:
                 return False, "no_end_date"
 
-            # Корректный парсинг timestamptz (не отрезаем таймзону)
             try:
                 edt = datetime.fromisoformat(str(end_date).replace(" ", "T"))
                 if edt.tzinfo is None:
@@ -580,7 +780,6 @@ class Database:
                 "total_payout": _to_float(row.get("total_payout")),
             }, None
         except Exception as e:
-            # Пробрасываем текст ошибки наружу, чтобы увидеть точную причину
             msg = str(e)
             print("[resolve_market_by_id rpc] error:", msg)
             return None, msg or "rpc_error"
