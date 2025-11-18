@@ -1,5 +1,4 @@
 import os
-import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,7 +42,6 @@ class Database:
 
     def create_user(self, chat_id: int, login: str, username: str = "") -> Optional[dict]:
         try:
-            # если уже есть — просто вернуть
             ex = self.get_user(chat_id)
             if ex:
                 return ex
@@ -52,11 +50,11 @@ class Database:
                 "login": login,
                 "username": username or None,
                 "status": "pending",
-                # balance по умолчанию (у вас 1000 -> миграция переведёт в 1000.0)
             }
             r = self.client.table("users").insert(ins).execute()
             return r.data[0] if r.data else None
-        except Exception:
+        except Exception as e:
+            print("[create_user] error:", e)
             return None
 
     def approve_user(self, chat_id: int) -> Optional[dict]:
@@ -200,17 +198,33 @@ class Database:
             return []
 
     def get_markets_for_event(self, event_uuid: str) -> List[dict]:
+        """
+        Возвращает рынки события. Пытаемся запросить resolved/winner_side (после миграции).
+        Если колонок ещё нет (до шага 3/3) — безопасный фолбэк без них.
+        """
+        # Попытка с новыми колонками
         try:
             r = (
                 self.client.table("prediction_markets")
-                .select("id, option_index, total_yes_reserve, total_no_reserve")
+                .select("id, option_index, total_yes_reserve, total_no_reserve, resolved, winner_side")
                 .eq("event_uuid", event_uuid)
                 .order("option_index", desc=False)
                 .execute()
             )
             return r.data or []
         except Exception:
-            return []
+            # Фолбэк до миграции
+            try:
+                r = (
+                    self.client.table("prediction_markets")
+                    .select("id, option_index, total_yes_reserve, total_no_reserve")
+                    .eq("event_uuid", event_uuid)
+                    .order("option_index", desc=False)
+                    .execute()
+                )
+                return r.data or []
+            except Exception:
+                return []
 
     def get_market_id(self, event_uuid: str, option_index: int) -> Optional[int]:
         try:
@@ -230,14 +244,7 @@ class Database:
 
     # ---------------- POSITIONS ----------------
     def get_user_positions(self, chat_id: int) -> List[dict]:
-        """
-        Возвращает список позиций пользователя:
-        - event_name, option_text
-        - share_type, quantity, average_price
-        - current_yes_price/current_no_price
-        """
         try:
-            # 1) все позиции пользователя
             shares = (
                 self.client.table("user_shares")
                 .select("user_chat_id, market_id, share_type, quantity, average_price")
@@ -253,7 +260,6 @@ class Database:
             if not market_ids:
                 return []
 
-            # 2) рынки по этим market_id
             mk = (
                 self.client.table("prediction_markets")
                 .select("id, event_uuid, option_index, total_yes_reserve, total_no_reserve")
@@ -264,7 +270,6 @@ class Database:
             )
             market_by_id = {int(m["id"]): m for m in mk}
 
-            # 3) события по event_uuid
             event_uuids = sorted({m["event_uuid"] for m in mk if m.get("event_uuid")})
             ev_map: Dict[str, dict] = {}
             if event_uuids:
@@ -297,7 +302,6 @@ class Database:
                 try:
                     idx = int(mkt.get("option_index", 0))
                     if isinstance(options, list) and 0 <= idx < len(options):
-                        # options — массив объектов {text: "..."}
                         item = options[idx]
                         opt_text = item.get("text") if isinstance(item, dict) else str(item)
                 except Exception:
@@ -337,7 +341,6 @@ class Database:
 
     def month_current_bounds(self) -> Dict[str, Any]:
         start = self._month_start_utc()
-        # следующий месяц
         if start.month == 12:
             end = datetime(start.year + 1, 1, 1, tzinfo=timezone.utc)
         else:
@@ -346,13 +349,8 @@ class Database:
         return {"start": start.date().isoformat(), "end": end.date().isoformat(), "label": label}
 
     def _current_equity_map(self, chat_ids: List[int]) -> Dict[int, float]:
-        """
-        Возвращает текущую оценку equity для каждого пользователя:
-        equity = users.balance + Σ(позиции по текущим ценам)
-        """
         if not chat_ids:
             return {}
-        # balances
         try:
             users = (
                 self.client.table("users")
@@ -366,7 +364,6 @@ class Database:
             users = []
         bal_map = {int(u["chat_id"]): _to_float(u.get("balance")) for u in users if u.get("status") == "approved"}
 
-        # shares for these users
         try:
             shares = (
                 self.client.table("user_shares")
@@ -398,7 +395,6 @@ class Database:
             except Exception:
                 mk_map = {}
 
-        # add share value
         for s in shares:
             uid = int(s["user_chat_id"])
             mid = int(s["market_id"])
@@ -417,11 +413,7 @@ class Database:
         return bal_map
 
     def get_leaderboard_week(self, start_iso: str, limit: int = 50) -> List[dict]:
-        """
-        earned = current_equity - weekly_baselines.equity (на неделю)
-        """
         try:
-            # approved users
             users = (
                 self.client.table("users")
                 .select("chat_id, login")
@@ -434,7 +426,6 @@ class Database:
             if not chat_ids:
                 return []
 
-            # baselines for start date
             bl = (
                 self.client.table("weekly_baselines")
                 .select("user_chat_id, equity")
@@ -452,7 +443,7 @@ class Database:
             for u in users:
                 cid = int(u["chat_id"])
                 cur = eq_map.get(cid, 0.0)
-                base = base_map.get(cid, cur)  # если нет baseline — считаем 0 прироста
+                base = base_map.get(cid, cur)
                 earned = cur - base
                 items.append({"chat_id": cid, "login": u.get("login"), "earned": float(round(earned, 2))})
 
@@ -507,11 +498,6 @@ class Database:
     def trade_buy(
         self, chat_id: int, event_uuid: str, option_index: int, side: str, amount: float
     ) -> Tuple[Dict[str, Any], Optional[str]]:
-        """
-        Вызывает public.rpc_trade_buy:
-          in:  p_chat_id, p_market_id, p_side, p_amount
-          out: got_shares, trade_price, new_balance, yes_price, no_price, yes_reserve, no_reserve
-        """
         try:
             market_id = self.get_market_id(event_uuid, option_index)
             if market_id is None:
@@ -542,6 +528,70 @@ class Database:
             print("[trade_buy rpc] error:", e)
             return {}, "rpc_error"
 
+    # ---------------- RESOLVE / PAYOUTS ----------------
+    def market_can_resolve(self, market_id: int) -> Tuple[bool, Optional[str]]:
+        """
+        Проверяем, наступило ли end_date у события, к которому принадлежит рынок.
+        """
+        try:
+            # 1) market -> event_uuid
+            mk = (
+                self.client.table("prediction_markets")
+                .select("event_uuid")
+                .eq("id", market_id)
+                .single()
+                .execute()
+            ).data
+            if not mk:
+                return False, "market_not_found"
 
-# Экспорт единственного экземпляра, как у вас было
+            evu = mk["event_uuid"]
+            ev = (
+                self.client.table("events")
+                .select("end_date")
+                .eq("event_uuid", evu)
+                .single()
+                .execute()
+            ).data
+            if not ev:
+                return False, "event_not_found"
+
+            end_date = ev.get("end_date")
+            if not end_date:
+                return False, "no_end_date"
+
+            # Supabase возвращает ISO-строку
+            try:
+                edt = datetime.fromisoformat(str(end_date).replace(" ", "T").split("+")[0]).replace(tzinfo=timezone.utc)
+            except Exception:
+                return False, "bad_end_date"
+
+            return (_now_utc() >= edt, None) if edt else (False, "bad_end_date")
+        except Exception as e:
+            print("[market_can_resolve] error:", e)
+            return False, "error"
+
+    def resolve_market_by_id(self, market_id: int, winner_side: str) -> Tuple[Optional[dict], Optional[str]]:
+        """
+        Вызывает rpc_resolve_market_by_id(market_id, winner_side).
+        Возвращает сводку (total_winners, total_payout, winner_side) или ошибку.
+        """
+        try:
+            payload = {"p_market_id": market_id, "p_winner": winner_side}
+            r = self.client.rpc("rpc_resolve_market_by_id", payload).execute()
+            if not r.data:
+                return None, "resolve_failed"
+            # Ожидаем первую строку-результат
+            row = r.data[0]
+            return {
+                "winner_side": row.get("winner_side", winner_side),
+                "total_winners": int(row.get("total_winners", 0)),
+                "total_payout": _to_float(row.get("total_payout")),
+            }, None
+        except Exception as e:
+            print("[resolve_market_by_id rpc] error:", e)
+            return None, "rpc_error"
+
+
+# Экспорт единственного экземпляра
 db = Database()
