@@ -1,6 +1,5 @@
 import os
 import json
-import uuid
 import hmac
 import hashlib
 import time
@@ -23,17 +22,14 @@ TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "change-me")
 ADMIN_BASIC_USER = os.getenv("ADMIN_BASIC_USER", "admin")
 ADMIN_BASIC_PASS = os.getenv("ADMIN_BASIC_PASS", "admin")
 
-WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # ОБЯЗАТЕЛЬНО задайте в Render
-
+WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # обязательный секрет
 
 # ---------- Admin auth ----------
 def _check_auth(u, p):
     return u == ADMIN_BASIC_USER and p == ADMIN_BASIC_PASS
 
-
 def _auth_required():
     return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="Admin"'})
-
 
 def requires_auth(fn):
     @wraps(fn)
@@ -43,7 +39,6 @@ def requires_auth(fn):
             return _auth_required()
         return fn(*args, **kwargs)
     return wrapper
-
 
 # ---------- Utils ----------
 def send_message(chat_id, text, reply_markup=None):
@@ -58,11 +53,9 @@ def send_message(chat_id, text, reply_markup=None):
         print(f"[send_message] error: {e}")
         return False
 
-
 def notify_admin(text: str):
     if ADMIN_ID:
         send_message(ADMIN_ID, text)
-
 
 def ensure_webhook():
     if not (BASE_URL and TOKEN):
@@ -78,13 +71,11 @@ def ensure_webhook():
     except Exception as e:
         print(f"[setWebhook] error: {e}")
 
-
 @app.before_request
 def _init_once():
     if not getattr(app, "_init_done", False):
         ensure_webhook()
         app._init_done = True
-
 
 def make_sig(chat_id: int) -> str:
     if not WEBAPP_SIGNING_SECRET:
@@ -92,12 +83,10 @@ def make_sig(chat_id: int) -> str:
     msg = str(chat_id).encode()
     return hmac.new(WEBAPP_SIGNING_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:32]
 
-
 def verify_sig(chat_id: int, sig: str) -> bool:
     if not WEBAPP_SIGNING_SECRET:
         return False
     return hmac.compare_digest(make_sig(chat_id), sig or "")
-
 
 # ---------- WebApp initData verification ----------
 def verify_telegram_init_data(init_data: str, max_age: int = 86400):
@@ -139,7 +128,6 @@ def verify_telegram_init_data(init_data: str, max_age: int = 86400):
         print("[verify_init] exception:", e)
         return None, "exception"
 
-
 def auth_chat_id_from_request():
     init_str = request.args.get("init")
     payload = None
@@ -172,19 +160,31 @@ def auth_chat_id_from_request():
         return None, "bad_sig"
     return chat_id, None
 
-
 # ---------- Health ----------
 @app.get("/health")
 def health():
     return jsonify(ok=True)
 
-
 @app.get("/")
 def index():
     return "OK"
 
+# ---------- Legal ----------
+LEGAL_HTML = """
+<!doctype html><meta charset="utf-8">
+<title>Правила и политика конфиденциальности</title>
+<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:780px;margin:24px auto;padding:0 16px;line-height:1.55}</style>
+<h1>Условия использования</h1>
+<p>Это учебная платформа предсказательных рынков. Никакой реальной валюты. Риски: котировки волатильны, вы можете потерять игровые кредиты.</p>
+<h2>Политика конфиденциальности</h2>
+<p>Мы храним минимальные данные профиля Telegram (chat_id, логин), историю сделок и баланс. Данные не продаются и не передаются третьим лицам.</p>
+<p>По вопросам свяжитесь с администратором бота.</p>
+"""
+@app.get("/legal")
+def legal():
+    return Response(LEGAL_HTML, mimetype="text/html")
 
-# ---------- Telegram webhook: только /start ----------
+# ---------- Telegram webhook ----------
 @app.post("/webhook")
 def telegram_webhook():
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
@@ -247,7 +247,6 @@ def telegram_webhook():
 
     return "ok"
 
-
 # ---------- Mini App HTML ----------
 MINI_APP_HTML = """
 <!doctype html>
@@ -280,7 +279,6 @@ MINI_APP_HTML = """
     .collapsed .caret { transform: rotate(-90deg); }
     .section-body { padding:10px 0 0 0; }
     .prob { color:#000; font-weight:800; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
-    /* top bar */
     .topbar { display:flex; justify-content:center; align-items:center; flex-direction:column; }
     .avatar-wrap { position: relative; width: 86px; height: 86px; }
     .avatar { width: 86px; height: 86px; border-radius: 50%; border: 2px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
@@ -288,35 +286,14 @@ MINI_APP_HTML = """
     .avatar.ph  { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:28px; color:#fff;
                   background: radial-gradient(circle at 30% 30%, #6a5acd, #00bcd4); letter-spacing: 1px; text-transform: uppercase; }
     .balance { text-align:center; font-weight:900; font-size:22px; margin: 10px 0 18px; }
-    /* modal */
-    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
-    .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
-    .modal h3 { margin:0 0 8px 0; }
-    .modal .row { justify-content: flex-start; }
-    input[type=number] { padding:8px; width: 140px; }
-    /* active bets */
-    .bet { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-    .bet-info { flex: 1 1 auto; }
-    .bet-win { flex: 0 0 auto; text-align:right; }
-    .win-val { font-size:22px; font-weight:900; color:#0b8457; line-height:1.1; }
-    .win-sub { font-size:12px; color:#666; }
-    .unit { font-size:12px; font-weight:700; color:#444; margin-left:2px; }
-    /* leaderboard */
-    .lb-head { text-align:center; font-weight:700; margin:6px 0 10px; }
-    .seg { display:inline-flex; background:#f0f0f0; border-radius:999px; padding:4px; gap:4px; }
-    .seg-btn { border:0; background:transparent; padding:6px 12px; border-radius:999px; font-weight:700; cursor:pointer; color:#444; transition:all .15s ease; }
-    .seg-btn.active { background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.08); color:#111; }
-    .lb-table { width:100%; }
-    .lb-row { display:grid; grid-template-columns: 32px 40px 1fr auto; align-items:center; padding:8px 6px; border-bottom:1px solid #eee; gap:8px; }
-    .lb-rank { text-align:center; font-weight:800; color:#444; }
-    .lb-ava { width:32px; height:32px; border-radius:50%; object-fit:cover; }
-    .lb-login { font-weight:600; color:#111; }
-    .lb-val { font-weight:900; font-size:16px; color:#0b8457; }
+    .toolbar { display:flex; gap:8px; align-items:center; margin: 6px 0 10px; }
+    .toolbar input { flex: 1 1 auto; padding:8px; border-radius:8px; border:1px solid #ddd; }
+    .toolbar .pill { padding:4px 10px; border-radius:999px; background:#f0f0f0; border:0; cursor:pointer; }
+    .footer { margin: 16px 6px; font-size: 12px; color:#666; }
   </style>
 </head>
 <body>
 
-  <!-- Аватар/инициалы и баланс -->
   <div class="topbar">
     <div class="avatar-wrap">
       <div id="avatarPH" class="avatar ph">U</div>
@@ -325,8 +302,15 @@ MINI_APP_HTML = """
   </div>
   <div id="balance" class="balance">Баланс: —</div>
 
+  <!-- Поиск/сортировка (клиентская, опционально) -->
+  <div class="toolbar">
+    <input id="q" placeholder="Поиск по событиям и тегам…">
+    <button id="sortDate" class="pill">По дате</button>
+    <button id="sortVol"  class="pill">По объёму</button>
+  </div>
+
   <!-- Активные ставки -->
-  <div id="wrap-active" class="section" style="margin-top:22px;">
+  <div id="wrap-active" class="section" style="margin-top:12px;">
     <div id="head-active" class="section-head" onclick="toggleSection('active')">
       <span class="section-title">Активные ставки</span>
       <span id="caret-active" class="caret">▾</span>
@@ -345,9 +329,12 @@ MINI_APP_HTML = """
     <div id="section-events" class="section-body">
       <div id="events-list">
         {% for e in events %}
-          <div class="card" data-event="{{ e.event_uuid }}">
+          <div class="card" data-event="{{ e.event_uuid }}" data-tags="{{ (e.tags or [])|join(',') }}" data-end="{{ e.end_ts }}" data-vol="{{ e.total_volume|int }}">
             <div><b>{{ e.name }}</b></div>
-            <p>{{ e.description }}</p>
+            <p class="muted">{{ e.description }}</p>
+            {% if e.tags %}
+              <div class="muted">Теги: {{ e.tags|join(', ') }}</div>
+            {% endif %}
 
             {% for idx, opt in enumerate(e.options) %}
               {% set md = e.markets.get(idx, {'yes_price': 0.5, 'volume': 0, 'end_short': e.end_short, 'resolved': false, 'winner_side': None}) %}
@@ -405,30 +392,32 @@ MINI_APP_HTML = """
       <span id="caret-leaders" class="caret">▸</span>
     </div>
     <div id="section-leaders" class="section-body" style="display:none;">
-      <div style="display:flex; align-items:center; justify-content:space-between; margin:6px 0 10px;">
-        <div id="lb-range" class="lb-head" style="margin:0; flex:1; text-align:center;">—</div>
-      </div>
+      <div id="lb-range" class="muted" style="margin:6px 0 10px;text-align:center;">—</div>
       <div style="display:flex; justify-content:center; margin-bottom:8px;">
         <div class="seg" id="seg">
-          <button class="seg-btn active" data-period="week">Неделя</button>
-          <button class="seg-btn" data-period="month">Месяц</button>
+          <button class="pill seg-btn active" data-period="week">Неделя</button>
+          <button class="pill seg-btn" data-period="month">Месяц</button>
         </div>
       </div>
-      <div id="lb-container" class="lb-table">Загрузка…</div>
+      <div id="lb-container" class="muted">Загрузка…</div>
     </div>
   </div>
 
-  <!-- Modal -->
-  <div id="modalBg" class="modal-bg">
-    <div class="modal">
-      <h3 id="mTitle">Покупка</h3>
+  <div class="footer">
+    <a href="/legal" target="_blank" rel="noopener">Правила и политика конфиденциальности</a>
+  </div>
+
+  <!-- Покупка -->
+  <div id="modalBg" class="modal-bg" style="position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center;">
+    <div class="modal" style="background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px;">
+      <h3 id="mTitle" style="margin:0 0 8px 0;">Покупка</h3>
       <div class="muted" id="mSub">Укажите сумму, не выше вашего баланса.</div>
       <div class="row" style="margin-top:10px;">
         <label>Сумма (кредиты):&nbsp;</label>
         <input type="number" id="mAmount" min="1" step="1" value="100"/>
       </div>
       <div class="muted" id="mHint" style="margin-top:8px;"></div>
-      <div class="row" style="margin-top:12px;">
+      <div class="row" style="margin-top:12px; display:flex; gap:8px;">
         <button class="btn yes" onclick="confirmBuy()">Купить</button>
         <button class="btn no"  onclick="closeBuy()">Отмена</button>
       </div>
@@ -450,90 +439,47 @@ MINI_APP_HTML = """
       return null;
     }
 
-    function getInitials() {
-      try {
-        const u = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
-        let s = "";
-        if (u) {
-          if (u.first_name) s += u.first_name[0];
-          if (u.last_name)  s += u.last_name[0];
-          if (!s && u.username) s = u.username.slice(0, 2);
-        }
-        if (!s) s = "U";
-        return s.toUpperCase();
-      } catch(e) { return "U"; }
-    }
-
-    function setAvatar() {
-      const ph = document.getElementById('avatarPH');
-      const img = document.getElementById('avatar');
-      ph.textContent = getInitials();
-      const tryImg = (src) => {
-        if (!src) return false;
-        img.onload = () => { img.style.display = 'block'; ph.style.display = 'none'; };
-        img.onerror = () => { img.style.display = 'none'; ph.style.display = 'flex'; };
-        img.src = src;
-        return true;
-      };
-      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.photo_url) {
-        if (tryImg(tg.initDataUnsafe.user.photo_url)) return;
-      }
-      const cid = getChatId();
-      if (cid) {
-        const url = `/api/userpic?chat_id=${cid}` + (SIG ? `&sig=${SIG}` : "") + (INIT ? `&init=${encodeURIComponent(INIT)}` : "");
-        tryImg(url);
-      }
-    }
-
     function toggleSection(name) {
       const body = document.getElementById("section-" + name);
       const caret = document.getElementById("caret-" + name);
       const head = document.getElementById("head-" + name);
       const key = "collapse_" + name;
-
       const nowShown = body.style.display !== "none";
-      if (nowShown) {
-        body.style.display = "none";
-        caret.textContent = "▸";
-        head.classList.add("collapsed");
-        try { localStorage.setItem(key, "1"); } catch(e){}
-      } else {
-        body.style.display = "block";
-        caret.textContent = "▾";
-        head.classList.remove("collapsed");
-        try { localStorage.setItem(key, "0"); } catch(e){}
-      }
+      if (nowShown) { body.style.display = "none"; caret.textContent = "▸"; head.classList.add("collapsed"); try { localStorage.setItem(key, "1"); } catch(e){} }
+      else { body.style.display = "block"; caret.textContent = "▾"; head.classList.remove("collapsed"); try { localStorage.setItem(key, "0"); } catch(e){} }
     }
-
     function toggleLeaders() {
       const body = document.getElementById("section-leaders");
       const caret = document.getElementById("caret-leaders");
       const head  = document.getElementById("head-leaders");
       const shown = body.style.display !== "none";
-      if (shown) {
-        body.style.display = "none"; caret.textContent = "▸"; head.classList.add("collapsed");
-      } else {
-        body.style.display = "block"; caret.textContent = "▾"; head.classList.remove("collapsed");
-        if (!toggleLeaders._loaded) { fetchLeaderboard(currentPeriod); toggleLeaders._loaded = true; }
+      if (shown) { body.style.display = "none"; caret.textContent = "▸"; head.classList.add("collapsed"); }
+      else { body.style.display = "block"; caret.textContent = "▾"; head.classList.remove("collapsed"); if (!toggleLeaders._loaded) { fetchLeaderboard('week'); toggleLeaders._loaded = true; } }
+    }
+
+    // Поиск/сортировка по клиенту
+    const q = document.getElementById('q');
+    const list = document.getElementById('events-list');
+    q.addEventListener('input', () => applyFilterSort());
+    document.getElementById('sortDate').onclick = () => applyFilterSort('date');
+    document.getElementById('sortVol').onclick  = () => applyFilterSort('vol');
+
+    function applyFilterSort(sortBy) {
+      const needle = (q.value || '').trim().toLowerCase();
+      const cards = Array.from(list.children);
+      cards.forEach(c => {
+        const text = c.innerText.toLowerCase();
+        const tags = (c.dataset.tags || '').toLowerCase();
+        const show = !needle || text.includes(needle) || tags.includes(needle);
+        c.style.display = show ? '' : 'none';
+      });
+      if (sortBy) {
+        const key = sortBy === 'date' ? (c => +(c.dataset.end||0)) : (c => +(c.dataset.vol||0));
+        cards.sort((a,b) => key(b) - key(a)).forEach(c => list.appendChild(c));
       }
     }
 
-    function applySavedCollapses() {
-      ["active","events"].forEach(name => {
-        const key = "collapse_" + name;
-        let collapsed = "0";
-        try { collapsed = localStorage.getItem(key) || "0"; } catch(e){}
-        if (collapsed === "1") {
-          const body = document.getElementById("section-" + name);
-          const caret = document.getElementById("caret-" + name);
-          const head = document.getElementById("head-" + name);
-          body.style.display = "none";
-          caret.textContent = "▸";
-          head.classList.add("collapsed");
-        }
-      });
-    }
-
+    // Профиль / позиции
     async function fetchMe() {
       const cid = getChatId();
       const activeDiv = document.getElementById("active");
@@ -560,16 +506,13 @@ MINI_APP_HTML = """
         activeDiv.textContent = "Сетевая ошибка.";
       }
     }
-
     function renderBalance(data) {
       const bal = data.user && typeof data.user.balance !== 'undefined' ? data.user.balance : "—";
       document.getElementById("balance").textContent = `Баланс: ${bal} кредитов`;
     }
-
     function renderActive(data) {
       const div = document.getElementById("active");
       div.innerHTML = "";
-
       if (!data.positions || data.positions.length === 0) {
         const m = document.createElement("div");
         m.className = "muted";
@@ -577,7 +520,6 @@ MINI_APP_HTML = """
         div.appendChild(m);
         return;
       }
-
       data.positions.forEach(pos => {
         const qty = +pos.quantity;
         const avg = +pos.average_price;
@@ -585,7 +527,7 @@ MINI_APP_HTML = """
         const el = document.createElement("div");
         el.className = "card";
         el.innerHTML = `
-          <div class="bet">
+          <div class="bet" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
             <div class="bet-info">
               <div><b>${pos.event_name}</b></div>
               <div class="muted">${pos.option_text}</div>
@@ -593,48 +535,16 @@ MINI_APP_HTML = """
               <div>Кол-во: ${qty.toFixed(4)} | Ср. цена: ${avg.toFixed(4)}</div>
               <div class="muted">Тек. цена ДА/НЕТ: ${(+pos.current_yes_price).toFixed(3)} / ${(+pos.current_no_price).toFixed(3)}</div>
             </div>
-            <div class="bet-win">
-              <div class="win-val">${payout.toFixed(2)} <span class="unit">кред.</span></div>
-              <div class="win-sub">возможная выплата</div>
+            <div class="bet-win" style="text-align:right;">
+              <div style="font-size:22px;font-weight:900;color:#0b8457;line-height:1.1;">${payout.toFixed(2)} <span style="font-size:12px;font-weight:700;color:#444;">кред.</span></div>
+              <div class="muted" style="font-size:12px;">возможная выплата</div>
             </div>
-          </div>
-        `;
+          </div>`;
         div.appendChild(el);
       });
     }
 
-    // hover: вероятность на кнопках ДА/НЕТ
-    document.addEventListener('mouseenter', (ev) => {
-      const btn = ev.target.closest('.buy-btn');
-      if (!btn) return;
-      btn.dataset.label = btn.textContent.trim();
-      const prob = btn.dataset.prob ? `${btn.dataset.prob}%` : btn.textContent.trim();
-      btn.textContent = prob;
-    }, true);
-
-    document.addEventListener('mouseleave', (ev) => {
-      const btn = ev.target.closest('.buy-btn');
-      if (!btn) return;
-      const label = btn.dataset.label || (btn.dataset.side === 'yes' ? 'ДА' : 'НЕТ');
-      btn.textContent = label;
-    }, true);
-
     // Лидеры
-    let currentPeriod = 'week';
-    function bindSeg() {
-      const seg = document.getElementById('seg');
-      if (!seg) return;
-      seg.addEventListener('click', (e) => {
-        const b = e.target.closest('.seg-btn');
-        if (!b) return;
-        const period = b.dataset.period || 'week';
-        if (period === currentPeriod) return;
-        currentPeriod = period;
-        for (const x of seg.querySelectorAll('.seg-btn')) x.classList.toggle('active', x === b);
-        fetchLeaderboard(period);
-      });
-    }
-
     async function fetchLeaderboard(period='week') {
       const lb = document.getElementById("lb-container");
       try {
@@ -644,40 +554,28 @@ MINI_APP_HTML = """
         if (INIT) url += `&init=${encodeURIComponent(INIT)}`;
         const r = await fetch(url);
         const data = await r.json();
-        if (!r.ok || !data.success) {
-          lb.textContent = "Ошибка загрузки рейтинга.";
-          return;
-        }
+        if (!r.ok || !data.success) { lb.textContent = "Ошибка загрузки рейтинга."; return; }
         document.getElementById("lb-range").textContent = data.week.label;
-
         const items = data.items || [];
-        if (items.length === 0) {
-          lb.textContent = "Пока нет данных за текущий период.";
-          return;
-        }
-        lb.innerHTML = "";
-        items.forEach((it, i) => {
+        lb.innerHTML = items.length ? "" : "Пока нет данных за текущий период.";
+        items.slice(0, 50).forEach((it, i) => {
           const row = document.createElement("div");
           row.className = "lb-row";
           const sig = (SIG ? `&sig=${SIG}` : "");
           const initQ = (INIT ? `&init=${encodeURIComponent(INIT)}` : "");
           const avaUrl = `/api/userpic?chat_id=${it.chat_id}${sig}${initQ}`;
           const initials = (it.login || "U").slice(0,2).toUpperCase();
-
           row.innerHTML = `
-            <div class="lb-rank">${i+1}</div>
+            <div style="text-align:center;font-weight:800;color:#444;">${i+1}</div>
             <div style="position:relative; width:32px; height:32px;">
               <div style="position:absolute; inset:0; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; color:#fff; background:linear-gradient(135deg,#6a5acd,#00bcd4)" data-ph>${initials}</div>
-              <img src="${avaUrl}" class="lb-ava" style="display:none" onload="this.style.display='block'; this.previousElementSibling.style.display='none';" onerror="this.style.display='none'; this.previousElementSibling.style.display='flex';">
+              <img src="${avaUrl}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;display:none" onload="this.style.display='block'; this.previousElementSibling.style.display='none';" onerror="this.style.display='none'; this.previousElementSibling.style.display='flex';">
             </div>
-            <div class="lb-login">${it.login || '—'}</div>
-            <div class="lb-val">${(+it.earned).toFixed(2)}</div>
-          `;
+            <div style="font-weight:600;color:#111;">${it.login || '—'}</div>
+            <div style="font-weight:900;font-size:16px;color:#0b8457;">${(+it.earned).toFixed(2)}</div>`;
           lb.appendChild(row);
         });
-      } catch(e) {
-        lb.textContent = "Сетевая ошибка.";
-      }
+      } catch(e) { lb.textContent = "Сетевая ошибка."; }
     }
 
     // Покупка
@@ -687,12 +585,10 @@ MINI_APP_HTML = """
       if (!cid) { alert("Не удалось получить chat_id. Откройте Mini App из чата командой /start."); return; }
       buyCtx = { event_uuid, option_index, side, chat_id: cid, optText };
       document.getElementById("mTitle").textContent = `Покупка: ${side.toUpperCase()} · ${optText}`;
-      document.getElementById("mHint").textContent = "Сумма будет списана с вашего баланса.";
       document.getElementById("mAmount").value = "100";
       document.getElementById("modalBg").style.display = "flex";
       if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
     }
-
     function closeBuy() { document.getElementById("modalBg").style.display = "none"; buyCtx = null; }
 
     async function confirmBuy() {
@@ -703,27 +599,19 @@ MINI_APP_HTML = """
         const body = { chat_id:+buyCtx.chat_id, event_uuid:buyCtx.event_uuid, option_index:buyCtx.option_index, side:buyCtx.side, amount };
         if (SIG)  body.sig = SIG;
         if (INIT) body.init = INIT;
-
         const r = await fetch("/api/market/buy", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
         const data = await r.json();
         if (!r.ok || !data.success) { alert("Ошибка: " + (data.error || r.statusText)); return; }
-
         const card = document.querySelector(`[data-event='${buyCtx.event_uuid}'] [data-option='${buyCtx.option_index}']`);
-        if (card) {
-          const probEl = card.querySelector(".prob");
-          if (probEl) probEl.textContent = `${Math.round(data.market.yes_price * 100)}%`;
-        }
-
+        if (card) { const probEl = card.querySelector(".prob"); if (probEl) probEl.textContent = `${Math.round(data.market.yes_price * 100)}%`; }
         await fetchMe();
-        if (document.getElementById("section-leaders").style.display !== "none") fetchLeaderboard(currentPeriod);
-
+        if (document.getElementById("section-leaders").style.display !== "none") fetchLeaderboard('week');
         closeBuy();
         if (tg && tg.showPopup) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${buyCtx.side.toUpperCase()})` });
         else alert("Успех: куплено " + data.trade.got_shares.toFixed(4) + " акций");
       } catch (e) { console.error(e); alert("Сетевая ошибка"); }
     }
 
-    // Делегирование кликов по кнопкам покупки
     document.addEventListener('click', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
@@ -734,20 +622,14 @@ MINI_APP_HTML = """
       openBuy(event_uuid, option_index, side, optText);
     });
 
-    window.openBuy = openBuy; window.confirmBuy = confirmBuy; window.closeBuy = closeBuy;
-
     (function init(){
       if (tg) tg.ready();
-      applySavedCollapses();
-      setAvatar();
       fetchMe();
-      bindSeg();
     })();
   </script>
 </body>
 </html>
 """
-
 
 def _format_end_short(end_iso: str) -> str:
     try:
@@ -760,7 +642,48 @@ def _format_end_short(end_iso: str) -> str:
             return f"{d}.{m}.{y[2:]}"
         return end_iso[:10]
 
+# ---------- Rate limiting (anti-abuse) ----------
+from collections import deque, defaultdict
 
+RL_USER_WINDOW = 10   # сек
+RL_USER_LIMIT  = 5    # запросов на покупку за окно
+RL_IP_WINDOW   = 60   # сек
+RL_IP_LIMIT    = 30   # запросов на покупку за окно
+
+_rl_user = defaultdict(deque)  # chat_id -> deque[timestamps]
+_rl_ip   = defaultdict(deque)  # ip -> deque[timestamps]
+
+def _now() -> float:
+    return time.time()
+
+def _client_ip() -> str:
+    xfwd = request.headers.get("X-Forwarded-For", "") or ""
+    if xfwd:
+        return xfwd.split(",")[0].strip()
+    return request.remote_addr or "0.0.0.0"
+
+def _check_rate(chat_id: int) -> bool:
+    t = _now()
+    # per user
+    dq = _rl_user[chat_id]
+    while dq and t - dq[0] > RL_USER_WINDOW:
+        dq.popleft()
+    if len(dq) >= RL_USER_LIMIT:
+        return False
+    dq.append(t)
+    # per IP
+    ip = _client_ip()
+    di = _rl_ip[ip]
+    while di and t - di[0] > RL_IP_WINDOW:
+        di.popleft()
+    if len(di) >= RL_IP_LIMIT:
+        # откат пользователя, если IP-лимит сработал
+        dq.pop()
+        return False
+    di.append(t)
+    return True
+
+# ---------- Mini App ----------
 @app.get("/mini-app")
 def mini_app():
     chat_id = request.args.get("chat_id", type=int)
@@ -774,19 +697,21 @@ def mini_app():
     if user.get("status") == "banned":
         return Response("<h3>Доступ запрещён</h3>", mimetype="text/html")
 
-    # Данные для шаблона
     events = db.get_published_events()
     for e in events:
         end_iso = str(e.get("end_date", ""))
         e["end_short"] = _format_end_short(end_iso)
-        mk = db.get_markets_for_event(e["event_uuid"])  # ожидаются поля resolved/winner_side
+        # рынки
+        mk = db.get_markets_for_event(e["event_uuid"])
         markets = {}
+        event_total_volume = 0.0
         for m in mk:
             yes = float(m["total_yes_reserve"])
             no = float(m["total_no_reserve"])
             total = yes + no
             yp = (no / total) if total > 0 else 0.5
             volume = max(0.0, total - 2000.0)
+            event_total_volume += volume
             markets[m["option_index"]] = {
                 "yes_price": yp,
                 "volume": volume,
@@ -795,9 +720,16 @@ def mini_app():
                 "winner_side": m.get("winner_side") if isinstance(m, dict) else None,
             }
         e["markets"] = markets
+        e["tags"] = e.get("tags") or []  # будет после миграции
+        # для сортировки/поиска
+        try:
+            dt = datetime.fromisoformat(end_iso.replace(" ", "T"))
+            e["end_ts"] = int(dt.replace(tzinfo=timezone.utc).timestamp())
+        except Exception:
+            e["end_ts"] = 0
+        e["total_volume"] = event_total_volume
 
     return render_template_string(MINI_APP_HTML, events=events, enumerate=enumerate)
-
 
 # ---------- API ----------
 @app.get("/api/me")
@@ -813,19 +745,26 @@ def api_me():
     positions = db.get_user_positions(chat_id)
     return jsonify(success=True, user={"chat_id": chat_id, "balance": u.get("balance", 0)}, positions=positions)
 
-
 @app.post("/api/market/buy")
 def api_market_buy():
     chat_id, err = auth_chat_id_from_request()
     if err:
         return jsonify(success=False, error=err), 403
 
+    # rate limit
+    if not _check_rate(chat_id):
+        return jsonify(success=False, error="rate_limited"), 429
+
     payload = request.get_json(silent=True) or {}
     try:
         event_uuid = str(payload.get("event_uuid"))
         option_index = int(payload.get("option_index"))
-        side = str(payload.get("side"))
+        side = str(payload.get("side")).lower()
         amount = float(payload.get("amount"))
+        if side not in ("yes","no"):
+            raise ValueError
+        if not (0 < amount <= 1_000_000):
+            raise ValueError
     except Exception:
         return jsonify(success=False, error="bad_payload"), 400
 
@@ -849,7 +788,6 @@ def api_market_buy():
             "no_reserve": result["no_reserve"],
         },
     )
-
 
 @app.get("/api/userpic")
 def api_userpic():
@@ -879,7 +817,6 @@ def api_userpic():
         print(f"[userpic] error: {e}")
         return Response(status=204)
 
-
 @app.get("/api/leaderboard")
 def api_leaderboard():
     period = (request.args.get("period") or "week").lower()
@@ -891,7 +828,6 @@ def api_leaderboard():
         items = db.get_leaderboard_week(bounds["start"], limit=50)
     return jsonify(success=True, week=bounds, items=items)
 
-
 # ---------- Admin panel ----------
 ADMIN_HTML = """
 <!doctype html>
@@ -899,62 +835,116 @@ ADMIN_HTML = """
 <head>
 <meta charset="utf-8"><title>Админ</title>
 <style>
-body{font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif;margin:16px;}
-h1{margin:0 0 12px;}
-.section{margin:18px 0;}
-.item{border:1px solid #ddd;border-radius:10px;margin:6px 0;}
-.item-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;cursor:pointer;}
-.item-body{display:none;border-top:1px dashed #ddd;padding:10px 12px;}
-.badge{padding:2px 8px;border-radius:999px;font-size:12px;background:#eee;}
-.row{margin:6px 0;}
-.btn{padding:6px 10px;border:0;border-radius:8px;cursor:pointer;}
-.approve{background:#2e7d32;color:#fff;}
-.reject{background:#999;color:#fff;}
-.ban{background:#c62828;color:#fff;}
-.unban{background:#6a5acd;color:#fff;}
-.save{background:#1976d2;color:#fff;}
-resolve{background:#6a5acd;color:#fff;}
-small{color:#666;}
-.list{display:flex;flex-direction:column;gap:6px;}
-table{width:100%;border-collapse:collapse;}
-td,th{padding:6px;border-bottom:1px solid #eee;text-align:left;font-size:14px;}
-th{font-weight:700;color:#333;}
-.muted{color:#666;}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:16px;max-width:1100px}
+h1{margin:0 0 12px}
+.section{margin:18px 0}
+.item{border:1px solid #ddd;border-radius:10px;margin:6px 0}
+.item-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;cursor:pointer}
+.item-body{display:none;border-top:1px dashed #ddd;padding:10px 12px}
+.badge{padding:2px 8px;border-radius:999px;font-size:12px;background:#eee}
+.row{margin:6px 0}
+.btn{padding:6px 10px;border:0;border-radius:8px;cursor:pointer}
+.approve{background:#2e7d32;color:#fff}
+.reject{background:#999;color:#fff}
+.ban{background:#c62828;color:#fff}
+.unban{background:#6a5acd;color:#fff}
+.save{background:#1976d2;color:#fff}
+small{color:#666}
+.list{display:flex;flex-direction:column;gap:6px}
+input[type=text],input[type=number],input[type=datetime-local],textarea{width:100%;padding:8px;border:1px solid #ddd;border-radius:8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+table{width:100%;border-collapse:collapse}
+td,th{padding:6px;border-bottom:1px solid #eee;text-align:left;font-size:14px}
+th{font-weight:700;color:#333}
+.muted{color:#666}
+.pill{padding:2px 8px;border-radius:999px;background:#f0f0f0}
 </style>
 <script>
-function toggleBody(id){
-  const e=document.getElementById(id);
-  e.style.display = e.style.display==='none' || !e.style.display ? 'block':'none';
-}
+function toggleBody(id){const e=document.getElementById(id); e.style.display = e.style.display==='none'||!e.style.display? 'block':'none';}
 async function adminPost(url, data){
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data||{})});
-  if(!r.ok){const t=await r.text(); alert('Ошибка: ' + t); return null;}
-  return await r.json().catch(()=>null);
+  let txt = await r.text();
+  try { var j = JSON.parse(txt); } catch(e){ alert('Ошибка: ' + txt); return null; }
+  if(!r.ok || !j.success){ alert('Ошибка: ' + (j.error || txt)); return null; }
+  return j;
 }
 async function resolveMarket(mid, winner){
   const ok = await adminPost('/admin/resolve_market/' + mid, {winner});
-  if(ok && ok.success){ alert('Рынок закрыт: ' + winner.toUpperCase()); location.reload(); }
-  else { alert('Ошибка резолва: ' + ((ok && ok.error) || '')); }
+  if(ok){ alert('Рынок закрыт: ' + winner.toUpperCase()); location.reload(); }
 }
 </script>
 </head>
 <body>
 <h1>Админская панель</h1>
 
+<!-- Дашборд -->
+<div class="section" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+  <div class="item"><div class="item-head"><b>Активных рынков</b></div><div class="item-body" style="display:block"><div style="font-size:28px;font-weight:800">{{ stats.open_markets }}</div></div></div>
+  <div class="item"><div class="item-head"><b>Оборот за день</b></div><div class="item-body" style="display:block"><div style="font-size:28px;font-weight:800">{{ stats.turnover_day|round(2) }}</div></div></div>
+  <div class="item"><div class="item-head"><b>Оборот за неделю</b></div><div class="item-body" style="display:block"><div style="font-size:28px;font-weight:800">{{ stats.turnover_week|round(2) }}</div></div></div>
+</div>
+<div class="section">
+  <h3>Топ событий по объёму (7 дней)</h3>
+  <table>
+    <thead><tr><th>#</th><th>Событие</th><th>Объём</th></tr></thead>
+    <tbody>
+      {% for t in stats.top_events %}
+        <tr><td>{{ loop.index }}</td><td>{{ t.name }}</td><td>{{ t.volume|round(2) }}</td></tr>
+      {% endfor %}
+      {% if not stats.top_events %}<tr><td colspan="3" class="muted">Нет данных</td></tr>{% endif %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Создание события -->
+<div class="section item">
+  <div class="item-head" onclick="toggleBody('createEvent')"><b>Создать событие</b><span class="pill">новое</span></div>
+  <div class="item-body" id="createEvent" style="display:none">
+    <form method="post" action="/admin/events/create" enctype="application/x-www-form-urlencoded" class="grid">
+      <div><label>Название</label><input type="text" name="name" required></div>
+      <div><label>Дата окончания</label><input type="datetime-local" name="end_date" required></div>
+      <div style="grid-column:1/3"><label>Описание</label><textarea name="description" rows="3" required></textarea></div>
+      <div style="grid-column:1/3"><label>Опции (по одной в строке)</label><textarea name="options" rows="4" placeholder="Вариант 1&#10;Вариант 2" required></textarea></div>
+      <div><label>Теги (через запятую)</label><input type="text" name="tags" placeholder="спорт, выборы"></div>
+      <div><label>Публиковать сразу</label><input type="checkbox" name="is_published" value="1" checked></div>
+      <div style="grid-column:1/3"><button class="btn save" type="submit">Создать</button></div>
+    </form>
+  </div>
+</div>
+
+<!-- Фильтр пользователей -->
+<div class="section item">
+  <div class="item-head" onclick="toggleBody('filterUsers')"><b>Фильтр пользователей</b></div>
+  <div class="item-body" id="filterUsers" style="display:block">
+    <form method="get" action="/admin" class="grid">
+      <div><label>Поиск (логин/ID)</label><input type="text" name="q" value="{{ q or '' }}"></div>
+      <div>
+        <label>Сортировка</label>
+        <select name="sort">
+          <option value="">—</option>
+          <option value="created_at" {% if sort=='created_at' %}selected{% endif %}>Дата заявки</option>
+          <option value="balance" {% if sort=='balance' %}selected{% endif %}>Баланс</option>
+        </select>
+      </div>
+      <div style="grid-column:1/3"><button class="btn save" type="submit">Применить</button></div>
+    </form>
+  </div>
+</div>
+
+<!-- Заявки -->
 <div class="section">
   <h2>Заявки ({{ pending|length }})</h2>
   <div class="list">
   {% for u in pending %}
     <div class="item">
       <div class="item-head" onclick="toggleBody('p{{u.chat_id}}')">
-        <div>#{{ loop.index }} • <b>{{ u.login }}</b> <small>(@{{u.username}})</small></div>
-        <div><span class="badge">ID {{ u.chat_id }}</span></div>
+        <div>#{{ loop.index }} • <b>{{ u.login }}</b> <small>(ID {{u.chat_id}})</small></div>
+        <div><span class="badge">Заявка от: {{ (u.created_at or '')[:16] }}</span></div>
       </div>
       <div class="item-body" id="p{{u.chat_id}}">
-        <div class="row"><small>Заявка от: {{ (u.created_at or '')[:16] }}</small></div>
         <div class="row">
           <button class="btn approve" onclick="adminPost('/admin/approve/{{u.chat_id}}').then(()=>location.reload())">Одобрить</button>
-          <button class="btn reject" onclick="adminPost('/admin/reject/{{u.chat_id}}').then(()=>location.reload())">Отклонить</button>
+          <button class="btn reject"  onclick="adminPost('/admin/reject/{{u.chat_id}}').then(()=>location.reload())">Отклонить</button>
         </div>
       </div>
     </div>
@@ -962,18 +952,19 @@ async function resolveMarket(mid, winner){
   </div>
 </div>
 
+<!-- Одобренные -->
 <div class="section">
   <h2>Одобренные ({{ approved|length }})</h2>
   <div class="list">
   {% for u in approved %}
     <div class="item">
       <div class="item-head" onclick="toggleBody('a{{u.chat_id}}')">
-        <div>#{{ loop.index }} • <b>{{ u.login }}</b> <small>(@{{u.username}})</small></div>
+        <div>#{{ loop.index }} • <b>{{ u.login }}</b> <small>(ID {{u.chat_id}})</small></div>
         <div><span class="badge">Баланс: {{u.balance}}</span></div>
       </div>
       <div class="item-body" id="a{{u.chat_id}}">
         <div class="row">Изменить баланс:
-          <input type="number" id="b{{u.chat_id}}" value="{{u.balance}}" style="width:120px;">
+          <input type="number" id="b{{u.chat_id}}" value="{{u.balance}}" style="width:160px;">
           <button class="btn save" onclick="
             adminPost('/admin/update_balance/{{u.chat_id}}',{balance: parseFloat(document.getElementById('b{{u.chat_id}}').value||0)})
             .then(()=>location.reload())
@@ -982,12 +973,26 @@ async function resolveMarket(mid, winner){
         <div class="row">
           <button class="btn ban" onclick="adminPost('/admin/ban/{{u.chat_id}}').then(()=>location.reload())">Бан</button>
         </div>
+        <!-- История баланса -->
+        <div class="row">
+          <div class="muted">История изменений (последние записи):</div>
+          <table>
+            <thead><tr><th>Когда</th><th>Δ</th><th>Причина</th><th>Order</th></tr></thead>
+            <tbody>
+              {% for l in u.ledger %}
+                <tr><td>{{ (l.created_at or '')[:16] }}</td><td>{{ l.delta }}</td><td>{{ l.reason }}</td><td>{{ l.order_id or '—' }}</td></tr>
+              {% endfor %}
+              {% if not u.ledger %}<tr><td colspan="4" class="muted">Нет записей</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   {% endfor %}
   </div>
 </div>
 
+<!-- Рынки (открытые) -->
 <div class="section">
   <h2>Рынки (открытые)</h2>
   <table>
@@ -1001,7 +1006,8 @@ async function resolveMarket(mid, winner){
           <td>{{ e.name }}</td>
           <td>{{ mk.option_text }}</td>
           <td>
-            {% set yes_pct = ('%.0f' % ((mk.total_no_reserve / (mk.total_yes_reserve + mk.total_no_reserve)) * 100)) if (mk.total_yes_reserve + mk.total_no_reserve) > 0 else '50' %}
+            {% set den = (mk.total_yes_reserve + mk.total_no_reserve) %}
+            {% set yes_pct = ('%.0f' % ((mk.total_no_reserve / den * 100) if den>0 else 50)) %}
             {{ yes_pct }}%
           </td>
           <td class="muted">{{ mk.end_short }}</td>
@@ -1022,17 +1028,17 @@ async function resolveMarket(mid, winner){
   <div class="muted">Кнопки активируются автоматически после наступления времени окончания события.</div>
 </div>
 
+<!-- Забаненные -->
 <div class="section">
   <h2>Забаненные ({{ banned|length }})</h2>
   <div class="list">
   {% for u in banned %}
     <div class="item">
       <div class="item-head" onclick="toggleBody('b{{u.chat_id}}')">
-        <div>#{{ loop.index }} • <b>{{ u.login }}</b> <small>(@{{u.username}})</small></div>
-        <div><span class="badge">ID {{ u.chat_id }}</span></div>
+        <div>#{{ loop.index }} • <b>{{ u.login }}</b> <small>(ID {{u.chat_id}})</small></div>
+        <div><span class="badge">Статус: banned</span></div>
       </div>
       <div class="item-body" id="b{{u.chat_id}}">
-        <div class="row"><small>Статус: banned</small></div>
         <div class="row">
           <button class="btn unban" onclick="adminPost('/admin/unban/{{u.chat_id}}').then(()=>location.reload())">Разбанить (одобрить)</button>
         </div>
@@ -1049,21 +1055,29 @@ async function resolveMarket(mid, winner){
 @app.get("/admin")
 @requires_auth
 def admin_panel():
-    pending = db.get_pending_users()
-    approved = db.get_approved_users()
-    banned = db.get_banned_users()
+    # фильтры
+    q = (request.args.get("q") or "").strip()
+    sort = (request.args.get("sort") or "").strip()
 
-    # Список открытых рынков по событиям; кнопки активны только после end_date
+    pending = db.search_users(status="pending", q=q, sort=sort)
+    approved = db.search_users(status="approved", q=q, sort=sort)
+    banned = db.search_users(status="banned", q=q, sort=sort)
+
+    # обогащаем approved ledger-историей
+    for u in approved:
+        u["ledger"] = db.get_ledger_for_user(u["chat_id"], limit=10) or []
+
+    # открытые рынки с готовностью к резолву
     admin_events = []
     now_utc = datetime.now(timezone.utc)
-    events = db.get_published_events()
-    for e in events:
+    evs = db.get_published_events()
+    for e in evs:
         mk = db.get_markets_for_event(e["event_uuid"])
         open_mk = []
         for m in mk:
             if bool(m.get("resolved")):
                 continue
-            # подтянем текст опции
+            # опция
             opt_text = "—"
             try:
                 idx = int(m["option_index"])
@@ -1073,14 +1087,14 @@ def admin_panel():
                     opt_text = o.get("text") if isinstance(o, dict) else str(o)
             except Exception:
                 pass
-            # проверим наступление времени
+            # время
             end_dt = e.get("end_date")
             can_resolve = False
             end_short = ""
             try:
                 if isinstance(end_dt, str):
-                    # Supabase возвращает ISO-строку
-                    edt = datetime.fromisoformat(end_dt.replace(" ", "T").split("+")[0]).replace(tzinfo=timezone.utc)
+                    edt = datetime.fromisoformat(end_dt.replace(" ", "T"))
+                    if edt.tzinfo is None: edt = edt.replace(tzinfo=timezone.utc)
                 else:
                     edt = end_dt
                 can_resolve = edt is not None and now_utc >= edt
@@ -1096,17 +1110,13 @@ def admin_panel():
                 "can_resolve": can_resolve
             })
         if open_mk:
-            admin_events.append({
-                "name": e["name"],
-                "open_markets": open_mk
-            })
+            admin_events.append({"name": e["name"], "open_markets": open_mk})
+
+    stats = db.get_admin_stats()
 
     return render_template_string(ADMIN_HTML,
-                                  pending=pending,
-                                  approved=approved,
-                                  banned=banned,
-                                  events=admin_events)
-
+                                  pending=pending, approved=approved, banned=banned,
+                                  events=admin_events, q=q, sort=sort, stats=stats)
 
 # ---- Admin actions ----
 @app.post("/admin/approve/<int:chat_id>")
@@ -1122,13 +1132,11 @@ def admin_approve(chat_id: int):
         return jsonify(success=True)
     return jsonify(success=False), 404
 
-
 @app.post("/admin/reject/<int:chat_id>")
 @requires_auth
 def admin_reject(chat_id: int):
     ok = db.reject_user(chat_id)
     return jsonify(success=bool(ok))
-
 
 @app.post("/admin/update_balance/<int:chat_id>")
 @requires_auth
@@ -1144,20 +1152,17 @@ def admin_update_balance(chat_id: int):
     user = db.admin_set_balance_via_ledger(chat_id, new_balance)
     return jsonify(success=bool(user))
 
-
 @app.post("/admin/ban/<int:chat_id>")
 @requires_auth
 def admin_ban(chat_id: int):
     user = db.ban_user(chat_id)
     return jsonify(success=bool(user))
 
-
 @app.post("/admin/unban/<int:chat_id>")
 @requires_auth
 def admin_unban(chat_id: int):
     user = db.unban_user(chat_id)
     return jsonify(success=bool(user))
-
 
 @app.post("/admin/resolve_market/<int:market_id>")
 @requires_auth
@@ -1166,17 +1171,52 @@ def admin_resolve_market(market_id: int):
     winner = (payload.get("winner") or "").lower()
     if winner not in ("yes", "no"):
         return jsonify(success=False, error="bad_winner"), 400
-
-    # Серверная проверка: можно резолвить только после end_date
     ok_time, err_time = db.market_can_resolve(market_id)
     if not ok_time:
         return jsonify(success=False, error=err_time or "too_early"), 400
-
     res, err = db.resolve_market_by_id(market_id, winner)
     if err:
         return jsonify(success=False, error=err), 400
     return jsonify(success=True, summary=res)
 
+# ---- Admin: create event with tags ----
+@app.post("/admin/events/create")
+@requires_auth
+def admin_create_event():
+    f = request.form
+    name = (f.get("name") or "").strip()
+    description = (f.get("description") or "").strip()
+    options_raw = (f.get("options") or "").strip()
+    end_date = (f.get("end_date") or "").strip()
+    tags_raw = (f.get("tags") or "").strip()
+    is_published = bool(f.get("is_published"))
+
+    if not (name and description and options_raw and end_date):
+        return Response("Bad request", status=400)
+
+    # options: одна в строке -> [{"text":...},...]
+    options = []
+    for line in options_raw.splitlines():
+        t = line.strip()
+        if t:
+            options.append({"text": t})
+    if not options:
+        return Response("No options", status=400)
+
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+
+    ok, err = db.create_event_with_markets(
+        name=name,
+        description=description,
+        options=options,
+        end_date=end_date,
+        tags=tags,
+        publish=is_published,
+        creator_id=int(ADMIN_ID) if ADMIN_ID and str(ADMIN_ID).isdigit() else None
+    )
+    if not ok:
+        return Response("Create error: " + (err or ""), status=400)
+    return Response("<script>location.href='/admin';</script>", mimetype="text/html")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
