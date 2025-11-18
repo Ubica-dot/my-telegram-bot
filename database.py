@@ -163,7 +163,6 @@ class Database:
             cur = self.get_user_balance(chat_id)
             delta = float(new_balance) - float(cur)
             if abs(delta) > 0:
-                # ledger запись
                 self.client.table("ledger").insert(
                     {
                         "chat_id": chat_id,
@@ -172,14 +171,12 @@ class Database:
                         "order_id": None,
                     }
                 ).execute()
-                # кэш users
                 self.client.table("users").update({"balance": round(float(new_balance), 4)}).eq("chat_id", chat_id).execute()
             return self.get_user(chat_id)
         except Exception as e:
             print("[admin_set_balance_via_ledger] error:", e)
             return None
 
-    # совместимость со старым вызовом
     def update_user_balance(self, chat_id: int, new_balance: float) -> Optional[dict]:
         return self.admin_set_balance_via_ledger(chat_id, new_balance)
 
@@ -198,11 +195,6 @@ class Database:
             return []
 
     def get_markets_for_event(self, event_uuid: str) -> List[dict]:
-        """
-        Возвращает рынки события. Пытаемся запросить resolved/winner_side (после миграции).
-        Если колонок ещё нет (до шага 3/3) — безопасный фолбэк без них.
-        """
-        # Попытка с новыми колонками
         try:
             r = (
                 self.client.table("prediction_markets")
@@ -213,7 +205,6 @@ class Database:
             )
             return r.data or []
         except Exception:
-            # Фолбэк до миграции
             try:
                 r = (
                     self.client.table("prediction_markets")
@@ -534,7 +525,6 @@ class Database:
         Проверяем, наступило ли end_date у события, к которому принадлежит рынок.
         """
         try:
-            # 1) market -> event_uuid
             mk = (
                 self.client.table("prediction_markets")
                 .select("event_uuid")
@@ -560,13 +550,15 @@ class Database:
             if not end_date:
                 return False, "no_end_date"
 
-            # Supabase возвращает ISO-строку
+            # Корректный парсинг timestamptz (не отрезаем таймзону)
             try:
-                edt = datetime.fromisoformat(str(end_date).replace(" ", "T").split("+")[0]).replace(tzinfo=timezone.utc)
+                edt = datetime.fromisoformat(str(end_date).replace(" ", "T"))
+                if edt.tzinfo is None:
+                    edt = edt.replace(tzinfo=timezone.utc)
             except Exception:
                 return False, "bad_end_date"
 
-            return (_now_utc() >= edt, None) if edt else (False, "bad_end_date")
+            return (_now_utc() >= edt, None)
         except Exception as e:
             print("[market_can_resolve] error:", e)
             return False, "error"
@@ -574,14 +566,13 @@ class Database:
     def resolve_market_by_id(self, market_id: int, winner_side: str) -> Tuple[Optional[dict], Optional[str]]:
         """
         Вызывает rpc_resolve_market_by_id(market_id, winner_side).
-        Возвращает сводку (total_winners, total_payout, winner_side) или ошибку.
+        Возвращает сводку (total_winners, total_payout, winner_side) или текст ошибки.
         """
         try:
             payload = {"p_market_id": market_id, "p_winner": winner_side}
             r = self.client.rpc("rpc_resolve_market_by_id", payload).execute()
             if not r.data:
                 return None, "resolve_failed"
-            # Ожидаем первую строку-результат
             row = r.data[0]
             return {
                 "winner_side": row.get("winner_side", winner_side),
@@ -589,8 +580,10 @@ class Database:
                 "total_payout": _to_float(row.get("total_payout")),
             }, None
         except Exception as e:
-            print("[resolve_market_by_id rpc] error:", e)
-            return None, "rpc_error"
+            # Пробрасываем текст ошибки наружу, чтобы увидеть точную причину
+            msg = str(e)
+            print("[resolve_market_by_id rpc] error:", msg)
+            return None, msg or "rpc_error"
 
 
 # Экспорт единственного экземпляра
