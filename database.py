@@ -168,13 +168,13 @@ class Database:
                 if qq.isdigit():
                     query = query.eq("chat_id", int(qq))
                 else:
+                    # триграммный индекс ускорит ilike
                     query = query.ilike("login", f"%{qq}%")
             if sort == "created_at":
                 query = query.order("created_at", desc=False)
             elif sort == "balance":
                 query = query.order("balance", desc=True)
             else:
-                # по умолчанию: для approved — по дате одобрения, иначе — по дате создания
                 if status == "approved":
                     query = query.order("approved_at", desc=True)
                 else:
@@ -220,14 +220,13 @@ class Database:
             print("[admin_set_balance_via_ledger] error:", e)
             return None
 
-    # Совместимость со старым вызовом
+    # Совместимость
     def update_user_balance(self, chat_id: int, new_balance: float) -> Optional[dict]:
         return self.admin_set_balance_via_ledger(chat_id, new_balance)
 
     # ---------------- EVENTS / MARKETS ----------------
     def get_published_events(self) -> List[dict]:
         try:
-            # пробуем включить tags, если колонка есть
             r = (
                 self.client.table("events")
                 .select("event_uuid, name, description, options, end_date, is_published, created_at, tags")
@@ -288,7 +287,7 @@ class Database:
         except Exception:
             return None
 
-    # Создание события с тегами и автосозданием рынков
+    # Создание события с тегами и (опционально) двойным исходом
     def create_event_with_markets(
         self,
         name: str,
@@ -298,9 +297,9 @@ class Database:
         tags: List[str],
         publish: bool,
         creator_id: Optional[int] = None,
+        double_outcome: bool = False,
     ) -> Tuple[bool, Optional[str]]:
         try:
-            # end_date строку приводим к ISO (timestamptz)
             try:
                 dt = datetime.fromisoformat(end_date.replace(" ", "T"))
                 if dt.tzinfo is None:
@@ -314,12 +313,11 @@ class Database:
                 "event_uuid": event_uuid,
                 "name": name,
                 "description": description,
-                "options": options,         # [{text:...}]
+                "options": options if not double_outcome else [{"text": "ДА"}, {"text": "НЕТ"}],
                 "end_date": end_iso,
                 "is_published": bool(publish),
                 "creator_id": creator_id or None,
             }
-            # если есть колонка tags — добавим
             try:
                 evt_with_tags = dict(evt)
                 evt_with_tags["tags"] = tags or []
@@ -331,8 +329,9 @@ class Database:
                 return False, "event_insert_failed"
 
             # Автосоздание рынков по количеству опций
+            final_options = evt["options"]
             rows = []
-            for idx, _ in enumerate(options):
+            for idx, _ in enumerate(final_options):
                 rows.append({
                     "event_uuid": event_uuid,
                     "option_index": idx,
@@ -349,8 +348,132 @@ class Database:
             print("[create_event_with_markets] error:", e)
             return False, "exception"
 
-    # ---------------- POSITIONS ----------------
+    # ---------------- GROUP RESOLVE (ADMIN) ----------------
+    def get_events_for_group_resolve(self) -> List[dict]:
+        """
+        Возвращает события, у которых достигнут end_date и есть нерешённые рынки.
+        Формат:
+          [
+            { event_uuid, name, end_short, open_count, rows: [{option_index, option_text}] }
+          ]
+        """
+        try:
+            now = _now_utc().isoformat()
+            evs = (
+                self.client.table("events")
+                .select("event_uuid, name, options, end_date, is_published")
+                .lte("end_date", now)
+                .eq("is_published", True)
+                .order("end_date", desc=False)
+                .execute()
+                .data
+                or []
+            )
+            out: List[dict] = []
+            for e in evs:
+                evu = e["event_uuid"]
+                mk = (
+                    self.client.table("prediction_markets")
+                    .select("id, option_index, resolved")
+                    .eq("event_uuid", evu)
+                    .execute()
+                    .data
+                    or []
+                )
+                open_opts = [m for m in mk if not bool(m.get("resolved"))]
+                if not open_opts:
+                    continue
+                # option_text
+                options = e.get("options") or []
+                rows = []
+                for m in sorted(open_opts, key=lambda x: int(x["option_index"])):
+                    idx = int(m["option_index"])
+                    opt_text = "—"
+                    if isinstance(options, list) and 0 <= idx < len(options):
+                        o = options[idx]
+                        opt_text = o.get("text") if isinstance(o, dict) else str(o)
+                    rows.append({"option_index": idx, "option_text": opt_text})
+                out.append({
+                    "event_uuid": evu,
+                    "name": e.get("name", "—"),
+                    "end_short": self._format_end_short(str(e.get("end_date", ""))),
+                    "open_count": len(rows),
+                    "rows": rows,
+                })
+            return out
+        except Exception as e:
+            print("[get_events_for_group_resolve] error:", e)
+            return []
+
+    def resolve_event_by_winners(self, event_uuid: str, winners: Dict[str, str]) -> Tuple[bool, Optional[str]]:
+        """
+        winners: {"0":"yes","1":"no", ...} — для каждой опции обязательна пара yes/no.
+        Закрывает все рынки события атомарно на стороне приложения (последовательно),
+        БД обеспечивает корректность (каждый рынок резолвится своей транзакцией).
+        """
+        try:
+            # Проверка дедлайна
+            ev = (
+                self.client.table("events")
+                .select("end_date, options")
+                .eq("event_uuid", event_uuid)
+                .single()
+                .execute()
+            ).data
+            if not ev:
+                return False, "event_not_found"
+
+            end_date = ev.get("end_date")
+            try:
+                edt = datetime.fromisoformat(str(end_date).replace(" ", "T"))
+                if edt.tzinfo is None:
+                    edt = edt.replace(tzinfo=timezone.utc)
+            except Exception:
+                return False, "bad_end_date"
+            if _now_utc() < edt:
+                return False, "too_early"
+
+            # Нерешённые рынки
+            mk = (
+                self.client.table("prediction_markets")
+                .select("id, option_index, resolved")
+                .eq("event_uuid", event_uuid)
+                .execute()
+                .data
+                or []
+            )
+            to_resolve = [m for m in mk if not bool(m.get("resolved"))]
+            if not to_resolve:
+                return True, None
+
+            # Должны быть указаны исходы по всем опциям
+            need = {int(m["option_index"]) for m in to_resolve}
+            got = {int(k) for k in winners.keys() if str(k).isdigit()}
+            if need != got:
+                return False, "winners_incomplete"
+
+            # Резолвим рынки последовательно
+            for m in sorted(to_resolve, key=lambda x: int(x["option_index"])):
+                idx = int(m["option_index"])
+                w = (winners.get(str(idx)) or winners.get(idx)) or ""
+                w = w.lower()
+                if w not in ("yes", "no"):
+                    return False, f"bad_winner_for_{idx}"
+                payload = {"p_market_id": int(m["id"]), "p_winner": w}
+                # RPC — транзакционно на каждой функции
+                rr = self.client.rpc("rpc_resolve_market_by_id", payload).execute()
+                if not rr.data:
+                    return False, "resolve_failed"
+            return True, None
+        except Exception as e:
+            print("[resolve_event_by_winners] error:", e)
+            return False, "rpc_error"
+
+    # ---------------- POSITIONS / ARCHIVE ----------------
     def get_user_positions(self, chat_id: int) -> List[dict]:
+        """
+        Активные позиции (ненулевые) с актуальными ценами.
+        """
         try:
             shares = (
                 self.client.table("user_shares")
@@ -360,6 +483,7 @@ class Database:
                 .data
                 or []
             )
+            shares = [s for s in shares if _to_float(s.get("quantity")) > 0]
             if not shares:
                 return []
 
@@ -430,175 +554,142 @@ class Database:
             print("[get_user_positions] error:", e)
             return []
 
-    # ---------------- LEADERBOARD ----------------
-    def _week_start_utc(self, dt: Optional[datetime] = None) -> datetime:
-        dt = dt or _now_utc()
-        monday = dt - timedelta(days=(dt.weekday()))
-        return datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc)
-
-    def _month_start_utc(self, dt: Optional[datetime] = None) -> datetime:
-        dt = dt or _now_utc()
-        return datetime(dt.year, dt.month, 1, tzinfo=timezone.utc)
-
-    def week_current_bounds(self) -> Dict[str, Any]:
-        start = self._week_start_utc()
-        end = start + timedelta(days=7)
-        label = f"{start.strftime('%d.%m.%y')} — {end.strftime('%d.%m.%y')}"
-        return {"start": start.date().isoformat(), "end": end.date().isoformat(), "label": label}
-
-    def month_current_bounds(self) -> Dict[str, Any]:
-        start = self._month_start_utc()
-        if start.month == 12:
-            end = datetime(start.year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end = datetime(start.year, start.month + 1, 1, tzinfo=timezone.utc)
-        label = f"{start.strftime('%d.%m.%y')} — {end.strftime('%d.%m.%y')}"
-        return {"start": start.date().isoformat(), "end": end.date().isoformat(), "label": label}
-
-    def _current_equity_map(self, chat_ids: List[int]) -> Dict[int, float]:
-        if not chat_ids:
-            return {}
+    def get_user_archive(self, chat_id: int) -> List[dict]:
+        """
+        Возвращает прошедшие ставки (выплаты), основано на ledger (reason payout_yes/no).
+        Если в ledger есть market_id, обогащаем названием события и опцией.
+        Формат элементов:
+          {
+            "event_name": str, "option_text": str, "winner_side": "yes"/"no",
+            "payout": float, "resolved_at": iso, "is_win": bool
+          }
+        """
+        out: List[dict] = []
         try:
-            users = (
-                self.client.table("users")
-                .select("chat_id, balance, status")
-                .in_("chat_id", chat_ids)
+            # Пытаемся получить market_id (если колонка есть)
+            cols = (
+                self.client.rpc("introspect_columns", {"p_table": "ledger"})
                 .execute()
                 .data
-                or []
             )
         except Exception:
-            users = []
-        bal_map = {int(u["chat_id"]): _to_float(u.get("balance")) for u in users if u.get("status") == "approved"}
+            cols = None
+
+        has_market_id = False
+        try:
+            # introspect_columns — не стандартная функция. Если её нет — просто попробуем запросом.
+            test = (
+                self.client.table("ledger")
+                .select("chat_id, delta, reason, market_id, created_at")
+                .eq("chat_id", chat_id)
+                .limit(1)
+                .execute()
+            )
+            # если дошли сюда — колонка есть
+            has_market_id = True
+        except Exception:
+            has_market_id = False
 
         try:
-            shares = (
-                self.client.table("user_shares")
-                .select("user_chat_id, market_id, share_type, quantity")
-                .in_("user_chat_id", chat_ids)
-                .execute()
-                .data
-                or []
-            )
-        except Exception:
-            shares = []
-
-        if not shares:
-            return bal_map
-
-        market_ids = sorted({int(s["market_id"]) for s in shares if s.get("market_id") is not None})
-        mk_map: Dict[int, dict] = {}
-        if market_ids:
-            try:
-                mk = (
-                    self.client.table("prediction_markets")
-                    .select("id, total_yes_reserve, total_no_reserve")
-                    .in_("id", market_ids)
+            if has_market_id:
+                # Берём все выплаты с market_id
+                pay = (
+                    self.client.table("ledger")
+                    .select("delta, reason, market_id, created_at")
+                    .eq("chat_id", chat_id)
+                    .in_("reason", ["payout_yes", "payout_no"])
+                    .order("created_at", desc=True)
+                    .limit(200)
                     .execute()
                     .data
                     or []
                 )
+                if not pay:
+                    return []
+                mids = sorted({int(p["market_id"]) for p in pay if p.get("market_id") is not None})
+                if mids:
+                    mk = (
+                        self.client.table("prediction_markets")
+                        .select("id, event_uuid, option_index, winner_side, resolved_at")
+                        .in_("id", mids)
+                        .execute()
+                        .data
+                        or []
+                    )
+                else:
+                    mk = []
                 mk_map = {int(m["id"]): m for m in mk}
-            except Exception:
-                mk_map = {}
+                evu_set = sorted({m["event_uuid"] for m in mk if m.get("event_uuid")})
+                ev_map = {}
+                if evu_set:
+                    evs = (
+                        self.client.table("events")
+                        .select("event_uuid, name, options")
+                        .in_("event_uuid", evu_set)
+                        .execute()
+                        .data
+                        or []
+                    )
+                    ev_map = {e["event_uuid"]: e for e in evs}
 
-        for s in shares:
-            uid = int(s["user_chat_id"])
-            mid = int(s["market_id"])
-            m = mk_map.get(mid)
-            if not m:
-                continue
-            yes_r = _to_float(m.get("total_yes_reserve"))
-            no_r = _to_float(m.get("total_no_reserve"))
-            tot = yes_r + no_r
-            yes_price = (no_r / tot) if tot > 0 else 0.5
-            no_price = 1.0 - yes_price
-            price = yes_price if s["share_type"] == "yes" else no_price
-            val = _to_float(s["quantity"]) * price
-            bal_map[uid] = bal_map.get(uid, 0.0) + val
-
-        return bal_map
-
-    def get_leaderboard_week(self, start_iso: str, limit: int = 50) -> List[dict]:
-        try:
-            users = (
-                self.client.table("users")
-                .select("chat_id, login")
-                .eq("status", "approved")
-                .execute()
-                .data
-                or []
-            )
-            chat_ids = [int(u["chat_id"]) for u in users]
-            if not chat_ids:
-                return []
-
-            bl = (
-                self.client.table("weekly_baselines")
-                .select("user_chat_id, equity")
-                .eq("week_start", start_iso)
-                .in_("user_chat_id", chat_ids)
-                .execute()
-                .data
-                or []
-            )
-            base_map = {int(b["user_chat_id"]): _to_float(b["equity"]) for b in bl}
-
-            eq_map = self._current_equity_map(chat_ids)
-
-            items: List[dict] = []
-            for u in users:
-                cid = int(u["chat_id"])
-                cur = eq_map.get(cid, 0.0)
-                base = base_map.get(cid, cur)
-                earned = cur - base
-                items.append({"chat_id": cid, "login": u.get("login"), "earned": float(round(earned, 2))})
-
-            items.sort(key=lambda x: x["earned"], reverse=True)
-            return items[:limit]
+                for p in pay:
+                    mid = int(p["market_id"])
+                    m = mk_map.get(mid)
+                    if not m:
+                        # fallback
+                        out.append({
+                            "event_name": "—",
+                            "option_text": "—",
+                            "winner_side": "yes" if p["reason"] == "payout_yes" else "no",
+                            "payout": _to_float(p["delta"]),
+                            "resolved_at": p.get("created_at"),
+                            "is_win": True if p["delta"] and _to_float(p["delta"]) > 0 else False,
+                        })
+                        continue
+                    ev = ev_map.get(m["event_uuid"], {})
+                    options = ev.get("options") or []
+                    opt_text = "—"
+                    try:
+                        idx = int(m.get("option_index", 0))
+                        if isinstance(options, list) and 0 <= idx < len(options):
+                            item = options[idx]
+                            opt_text = item.get("text") if isinstance(item, dict) else str(item)
+                    except Exception:
+                        pass
+                    out.append({
+                        "event_name": ev.get("name", "—"),
+                        "option_text": opt_text,
+                        "winner_side": (m.get("winner_side") or ("yes" if p["reason"] == "payout_yes" else "no")),
+                        "payout": _to_float(p["delta"]),
+                        "resolved_at": m.get("resolved_at") or p.get("created_at"),
+                        "is_win": True if p["delta"] and _to_float(p["delta"]) > 0 else False,
+                    })
+                return out
+            else:
+                # Без market_id — покажем хотя бы факт выплат
+                pay = (
+                    self.client.table("ledger")
+                    .select("delta, reason, created_at")
+                    .eq("chat_id", chat_id)
+                    .in_("reason", ["payout_yes", "payout_no"])
+                    .order("created_at", desc=True)
+                    .limit(200)
+                    .execute()
+                    .data
+                    or []
+                )
+                for p in pay:
+                    out.append({
+                        "event_name": "—",
+                        "option_text": "—",
+                        "winner_side": "yes" if p["reason"] == "payout_yes" else "no",
+                        "payout": _to_float(p["delta"]),
+                        "resolved_at": p.get("created_at"),
+                        "is_win": True if p["delta"] and _to_float(p["delta"]) > 0 else False,
+                    })
+                return out
         except Exception as e:
-            print("[get_leaderboard_week] error:", e)
-            return []
-
-    def get_leaderboard_month(self, start_iso: str, limit: int = 50) -> List[dict]:
-        try:
-            users = (
-                self.client.table("users")
-                .select("chat_id, login")
-                .eq("status", "approved")
-                .execute()
-                .data
-                or []
-            )
-            chat_ids = [int(u["chat_id"]) for u in users]
-            if not chat_ids:
-                return []
-
-            bl = (
-                self.client.table("monthly_baselines")
-                .select("user_chat_id, equity")
-                .eq("month_start", start_iso)
-                .in_("user_chat_id", chat_ids)
-                .execute()
-                .data
-                or []
-            )
-            base_map = {int(b["user_chat_id"]): _to_float(b["equity"]) for b in bl}
-
-            eq_map = self._current_equity_map(chat_ids)
-
-            items: List[dict] = []
-            for u in users:
-                cid = int(u["chat_id"])
-                cur = eq_map.get(cid, 0.0)
-                base = base_map.get(cid, cur)
-                earned = cur - base
-                items.append({"chat_id": cid, "login": u.get("login"), "earned": float(round(earned, 2))})
-
-            items.sort(key=lambda x: x["earned"], reverse=True)
-            return items[:limit]
-        except Exception as e:
-            print("[get_leaderboard_month] error:", e)
+            print("[get_user_archive] error:", e)
             return []
 
     # ---------------- ADMIN STATS ----------------
@@ -610,7 +701,6 @@ class Database:
             "top_events": [],
         }
         try:
-            # open markets
             try:
                 r = self.client.table("prediction_markets").select("id", count="exact").eq("resolved", False).execute()
                 stats["open_markets"] = int(r.count or (len(r.data) if r.data else 0))
@@ -620,7 +710,6 @@ class Database:
         except Exception:
             pass
 
-        # turnover day/week
         now = _now_utc()
         day_dt = (now - timedelta(days=1)).isoformat()
         week_dt = (now - timedelta(days=7)).isoformat()
@@ -646,8 +735,6 @@ class Database:
                 or []
             )
             stats["turnover_week"] = float(round(sum(_to_float(x.get("amount")) for x in w), 2))
-
-            # top events по сумме amount за неделю
             if w:
                 by_market: Dict[int, float] = {}
                 for x in w:
@@ -722,9 +809,6 @@ class Database:
 
     # ---------------- RESOLVE / PAYOUTS ----------------
     def market_can_resolve(self, market_id: int) -> Tuple[bool, Optional[str]]:
-        """
-        Проверяем, наступило ли end_date у события, к которому принадлежит рынок.
-        """
         try:
             mk = (
                 self.client.table("prediction_markets")
@@ -764,10 +848,6 @@ class Database:
             return False, "error"
 
     def resolve_market_by_id(self, market_id: int, winner_side: str) -> Tuple[Optional[dict], Optional[str]]:
-        """
-        Вызывает rpc_resolve_market_by_id(market_id, winner_side).
-        Возвращает сводку (total_winners, total_payout, winner_side) или текст ошибки.
-        """
         try:
             payload = {"p_market_id": market_id, "p_winner": winner_side}
             r = self.client.rpc("rpc_resolve_market_by_id", payload).execute()
@@ -783,6 +863,19 @@ class Database:
             msg = str(e)
             print("[resolve_market_by_id rpc] error:", msg)
             return None, msg or "rpc_error"
+
+    # ---------------- Helpers ----------------
+    @staticmethod
+    def _format_end_short(end_iso: str) -> str:
+        try:
+            dt = datetime.fromisoformat(end_iso.replace(" ", "T").split(".")[0])
+            return dt.strftime("%d.%m.%y")
+        except Exception:
+            s = (end_iso or "")[:10]
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                y, m, d = s.split("-")
+                return f"{d}.{m}.{y[2:]}"
+            return (end_iso or "")[:10]
 
 
 # Экспорт единственного экземпляра
