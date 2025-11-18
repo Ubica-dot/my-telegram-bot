@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import time
 from datetime import datetime
+from urllib.parse import parse_qsl
 
 import requests
 from flask import Flask, request, render_template_string, jsonify, Response, stream_with_context
@@ -37,10 +38,10 @@ def _auth_required():
 def requires_auth(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-      auth = request.authorization
-      if not auth or not _check_auth(auth.username, auth.password):
-          return _auth_required()
-      return fn(*args, **kwargs)
+        auth = request.authorization
+        if not auth or not _check_auth(auth.username, auth.password):
+            return _auth_required()
+        return fn(*args, **kwargs)
     return wrapper
 
 
@@ -86,7 +87,6 @@ def _init_once():
 
 
 def make_sig(chat_id: int) -> str:
-    # Без секрета Mini App запрещён
     if not WEBAPP_SIGNING_SECRET:
         return ""
     msg = str(chat_id).encode()
@@ -97,6 +97,112 @@ def verify_sig(chat_id: int, sig: str) -> bool:
     if not WEBAPP_SIGNING_SECRET:
         return False
     return hmac.compare_digest(make_sig(chat_id), sig or "")
+
+
+# ---------- WebApp initData verification ----------
+def verify_telegram_init_data(init_data: str, max_age: int = 86400):
+    """
+    Проверка подписи initData по правилам Telegram:
+    1) data_check_string = соединяем "key=value" (кроме hash), ключи отсортированы по алфавиту, через \n
+    2) secret_key = HMAC_SHA256("WebAppData", BOT_TOKEN)
+    3) expected_hash = HMAC_SHA256(data_check_string, secret_key) в hex
+    4) Сравнить expected_hash с hash из initData и проверить auth_date не старше max_age секунд
+    Возвращает (payload_dict, None) при успехе, либо (None, "error").
+    """
+    if not init_data:
+        return None, "no_init"
+
+    if not TOKEN:
+        # Без токена проверить нельзя — считаем ошибкой, если init передан
+        return None, "no_token"
+
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        recv_hash = (pairs.pop("hash", "") or "").lower()
+        if not recv_hash:
+            return None, "no_hash"
+
+        # Возраст
+        try:
+            auth_date = int(pairs.get("auth_date", "0") or "0")
+        except Exception:
+            return None, "bad_auth_date"
+        if auth_date <= 0 or (int(time.time()) - auth_date) > max_age:
+            return None, "stale"
+
+        # data_check_string
+        data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs.keys()))
+
+        # secret_key = HMAC_SHA256("WebAppData", bot_token)
+        secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+        expected = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(expected, recv_hash):
+            return None, "bad_hash"
+
+        # Распарсим user (если есть)
+        user = {}
+        if "user" in pairs and pairs["user"]:
+            try:
+                user = json.loads(pairs["user"])
+            except Exception:
+                user = {}
+
+        payload = {
+            "auth_date": auth_date,
+            "query_id": pairs.get("query_id"),
+            "user": user,
+            "user_id": int(user["id"]) if isinstance(user, dict) and "id" in user else None,
+            "raw": pairs,
+        }
+        return payload, None
+    except Exception as e:
+        print("[verify_init] exception:", e)
+        return None, "exception"
+
+
+def auth_chat_id_from_request():
+    """
+    Если клиент прислал init (из Telegram WebApp), мы ОБЯЗАТЕЛЬНО валидируем его и берём chat_id из user.id.
+    Если init отсутствует — падаем назад на проверку SIG (ваша текущая схема).
+    Также, если клиент одновременно прислал chat_id и init, сверяем их равенство.
+    Возвращаем (chat_id, None) при успехе или (None, error).
+    """
+    init_str = request.args.get("init")
+    payload = None
+    if request.method in ("POST", "PUT", "PATCH"):
+        payload = request.get_json(silent=True) or {}
+        if not init_str:
+            init_str = payload.get("init")
+
+    if init_str:
+        info, err = verify_telegram_init_data(init_str)
+        if err:
+            return None, f"bad_init:{err}"
+        user_id = info.get("user_id")
+        if not user_id:
+            return None, "bad_init:no_user"
+        # Если вместе с init передали chat_id — сверим
+        chat_id_param = request.args.get("chat_id", type=int)
+        if chat_id_param is None and payload:
+            try:
+                chat_id_param = int(payload.get("chat_id")) if payload.get("chat_id") is not None else None
+            except Exception:
+                chat_id_param = None
+        if chat_id_param is not None and chat_id_param != user_id:
+            return None, "chat_id_mismatch"
+        return user_id, None
+
+    # Fallback: старая схема SIG
+    chat_id = request.args.get("chat_id", type=int)
+    sig = request.args.get("sig", "")
+    if payload:
+        chat_id = chat_id if chat_id is not None else (int(payload.get("chat_id")) if payload.get("chat_id") else None)
+        sig = sig or (payload.get("sig") or "")
+
+    if not chat_id or not verify_sig(chat_id, sig):
+        return None, "bad_sig"
+    return chat_id, None
 
 
 # ---------- Health ----------
@@ -113,7 +219,6 @@ def index():
 # ---------- Telegram webhook: только /start ----------
 @app.post("/webhook")
 def telegram_webhook():
-    # Проверка секрета Telegram
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if TELEGRAM_SECRET_TOKEN and secret != TELEGRAM_SECRET_TOKEN:
         return "forbidden", 403
@@ -130,23 +235,20 @@ def telegram_webhook():
     user = db.get_user(chat_id)
     status = (user or {}).get("status")
 
-    # Разрешаем только /start, остальное игнорируем
     if text == "/start":
         if not user:
-            # Нет в базе — просим ввести логин одним сообщением
             send_message(
                 chat_id,
                 "Добро пожаловать! Напишите ваш желаемый логин одним сообщением. После модерации получите доступ к приложению."
             )
         else:
             if status == "approved":
-                # Одобрен — сразу даём кнопку Mini App
                 sig = make_sig(chat_id)
                 if not sig:
                     send_message(chat_id, "Сервис временно недоступен. Повторите позже.")
                     return "ok"
                 web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-                kb = { "inline_keyboard": [ [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}] ] }
+                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]}
                 send_message(chat_id, "Приложение готово. Открывайте:", kb)
             elif status == "pending":
                 send_message(chat_id, "⏳ Ваша заявка на регистрацию ожидает проверки администратором.")
@@ -158,7 +260,6 @@ def telegram_webhook():
                 send_message(chat_id, "Напишите ваш логин одним сообщением для регистрации.")
         return "ok"
 
-    # Любой текст НЕ команда: если нет пользователя — трактуем как логин, если в pending — просто уведомляем
     if not text.startswith("/"):
         if not user:
             new_user = db.create_user(chat_id, text, username)
@@ -176,7 +277,6 @@ def telegram_webhook():
                 send_message(chat_id, "🚫 Доступ запрещён.")
         return "ok"
 
-    # Любые другие /команды игнорируем
     return "ok"
 
 
@@ -196,7 +296,6 @@ MINI_APP_HTML = """
     .opt-title { display:flex; align-items:center; font-weight: 700; }
     .btn  { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-size: 15px; font-weight: 700;
             transition: background-color .18s ease, color .18s ease; min-width: 92px; min-height: 42px; }
-    /* Мягкие фоны (без alpha). На hover — насыщенный фон, текст — бледный в тон исходному фону */
     .yes  { background: #CDEAD2; color: #2e7d32; }
     .no   { background: #F3C7C7; color: #c62828; }
     .yes:hover { background: #2e7d32; color: #CDEAD2; }
@@ -213,7 +312,6 @@ MINI_APP_HTML = """
     .collapsed .caret { transform: rotate(-90deg); }
     .section-body { padding:10px 0 0 0; }
     .prob { color:#000; font-weight:800; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
-    /* top bar */
     .topbar { display:flex; justify-content:center; align-items:center; flex-direction:column; }
     .avatar-wrap { position: relative; width: 86px; height: 86px; }
     .avatar { width: 86px; height: 86px; border-radius: 50%; border: 2px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
@@ -221,20 +319,17 @@ MINI_APP_HTML = """
     .avatar.ph  { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:28px; color:#fff;
                   background: radial-gradient(circle at 30% 30%, #6a5acd, #00bcd4); letter-spacing: 1px; text-transform: uppercase; }
     .balance { text-align:center; font-weight:900; font-size:22px; margin: 10px 0 18px; }
-    /* modal */
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center; }
     .modal { background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px; }
     .modal h3 { margin:0 0 8px 0; }
     .modal .row { justify-content: flex-start; }
     input[type=number] { padding:8px; width: 140px; }
-    /* active bets */
     .bet { display:flex; align-items:center; justify-content:space-between; gap:12px; }
     .bet-info { flex: 1 1 auto; }
     .bet-win { flex: 0 0 auto; text-align:right; }
     .win-val { font-size:22px; font-weight:900; color:#0b8457; line-height:1.1; }
     .win-sub { font-size:12px; color:#666; }
     .unit { font-size:12px; font-weight:700; color:#444; margin-left:2px; }
-    /* leaderboard */
     .lb-head { text-align:center; font-weight:700; margin:6px 0 10px; }
     .seg { display:inline-flex; background:#f0f0f0; border-radius:999px; padding:4px; gap:4px; }
     .seg-btn { border:0; background:transparent; padding:6px 12px; border-radius:999px; font-weight:700; cursor:pointer; color:#444; transition:all .15s ease; }
@@ -249,7 +344,6 @@ MINI_APP_HTML = """
 </head>
 <body>
 
-  <!-- Аватар/инициалы и баланс -->
   <div class="topbar">
     <div class="avatar-wrap">
       <div id="avatarPH" class="avatar ph">U</div>
@@ -258,7 +352,6 @@ MINI_APP_HTML = """
   </div>
   <div id="balance" class="balance">Баланс: —</div>
 
-  <!-- Активные ставки -->
   <div id="wrap-active" class="section" style="margin-top:22px;">
     <div id="head-active" class="section-head" onclick="toggleSection('active')">
       <span class="section-title">Активные ставки</span>
@@ -269,7 +362,6 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Мероприятия -->
   <div id="wrap-events" class="section">
     <div id="head-events" class="section-head" onclick="toggleSection('events')">
       <span class="section-title">Мероприятия</span>
@@ -321,7 +413,6 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Таблица лидеров -->
   <div id="wrap-leaders" class="section">
     <div id="head-leaders" class="section-head" onclick="toggleLeaders()">
       <span class="section-title">Таблица лидеров</span>
@@ -341,7 +432,6 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Modal -->
   <div id="modalBg" class="modal-bg">
     <div class="modal">
       <h3 id="mTitle">Покупка</h3>
@@ -365,6 +455,7 @@ MINI_APP_HTML = """
     const qs = new URLSearchParams(location.search);
     const CHAT_ID = qs.get("chat_id");
     const SIG = qs.get("sig") || "";
+    const INIT = tg && tg.initData ? tg.initData : ""; // добавлено: пересылаем на сервер
 
     function getChatId() {
       if (CHAT_ID) return CHAT_ID;
@@ -402,7 +493,7 @@ MINI_APP_HTML = """
       }
       const cid = getChatId();
       if (cid) {
-        const url = `/api/userpic?chat_id=${cid}` + (SIG ? `&sig=${SIG}` : "");
+        const url = `/api/userpic?chat_id=${cid}` + (SIG ? `&sig=${SIG}` : "") + (INIT ? `&init=${encodeURIComponent(INIT)}` : "");
         tryImg(url);
       }
     }
@@ -467,7 +558,9 @@ MINI_APP_HTML = """
         return;
       }
       try {
-        const url = `/api/me?chat_id=${cid}` + (SIG ? `&sig=${SIG}` : "");
+        let url = `/api/me?chat_id=${cid}`;
+        if (SIG)  url += `&sig=${SIG}`;
+        if (INIT) url += `&init=${encodeURIComponent(INIT)}`;
         const r = await fetch(url);
         const data = await r.json();
         if (!r.ok || !data.success) {
@@ -525,7 +618,7 @@ MINI_APP_HTML = """
       });
     }
 
-    // hover: подмена текста на вероятность
+    // hover: вероятность
     document.addEventListener('mouseenter', (ev) => {
       const btn = ev.target.closest('.buy-btn');
       if (!btn) return;
@@ -541,7 +634,7 @@ MINI_APP_HTML = """
       btn.textContent = label;
     }, true);
 
-    // ---- лидеры неделя/месяц ----
+    // ---- лидеры ----
     let currentPeriod = 'week';
     function bindSeg() {
       const seg = document.getElementById('seg');
@@ -561,7 +654,9 @@ MINI_APP_HTML = """
       const cid = getChatId();
       const lb = document.getElementById("lb-container");
       try {
-        const url = "/api/leaderboard?period=" + encodeURIComponent(period) + (cid ? `&viewer=${cid}` : "");
+        let url = "/api/leaderboard?period=" + encodeURIComponent(period);
+        if (cid)  url += `&viewer=${cid}`;
+        if (INIT) url += `&init=${encodeURIComponent(INIT)}`;
         const r = await fetch(url);
         const data = await r.json();
         if (!r.ok || !data.success) {
@@ -580,7 +675,8 @@ MINI_APP_HTML = """
           const row = document.createElement("div");
           row.className = "lb-row";
           const sig = (SIG ? `&sig=${SIG}` : "");
-          const avaUrl = `/api/userpic?chat_id=${it.chat_id}${sig}`;
+          const initQ = (INIT ? `&init=${encodeURIComponent(INIT)}` : "");
+          const avaUrl = `/api/userpic?chat_id=${it.chat_id}${sig}${initQ}`;
           const initials = (it.login || "U").slice(0,2).toUpperCase();
 
           row.innerHTML = `
@@ -620,7 +716,8 @@ MINI_APP_HTML = """
       if (!(amount > 0)) { alert("Введите положительную сумму"); return; }
       try {
         const body = { chat_id:+buyCtx.chat_id, event_uuid:buyCtx.event_uuid, option_index:buyCtx.option_index, side:buyCtx.side, amount };
-        if (SIG) body.sig = SIG;
+        if (SIG)  body.sig = SIG;
+        if (INIT) body.init = INIT;
 
         const r = await fetch("/api/market/buy", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
         const data = await r.json();
@@ -636,7 +733,6 @@ MINI_APP_HTML = """
         if (document.getElementById("section-leaders").style.display !== "none") fetchLeaderboard(currentPeriod);
 
         closeBuy();
-        // ИСПРАВЛЕНО: корректная template‑строка без лишних скобок/конкатенаций
         if (tg && tg.showPopup) tg.showPopup({ title: "Успешно", message: `Куплено ${data.trade.got_shares.toFixed(4)} акций (${buyCtx.side.toUpperCase()})` });
         else alert("Успех: куплено " + data.trade.got_shares.toFixed(4) + " акций");
       } catch (e) { console.error(e); alert("Сетевая ошибка"); }
@@ -655,14 +751,12 @@ MINI_APP_HTML = """
 
     window.openBuy = openBuy; window.confirmBuy = confirmBuy; window.closeBuy = closeBuy;
 
-    // Инициализация
     (function init(){
       if (tg) tg.ready();
       applySavedCollapses();
       setAvatar();
       fetchMe();
       bindSeg();
-      // Лидеров грузим при первом раскрытии
     })();
   </script>
 </body>
@@ -684,7 +778,7 @@ def _format_end_short(end_iso: str) -> str:
 
 @app.get("/mini-app")
 def mini_app():
-    # Жёсткий доступ: нужен chat_id + sig + статус approved (и не banned)
+    # Для показа страницы по-прежнему требуем chat_id+sig (как раньше), чтобы без Telegram WebView нельзя было зайти
     chat_id = request.args.get("chat_id", type=int)
     sig = request.args.get("sig", "")
     if not chat_id or not sig or not verify_sig(chat_id, sig):
@@ -696,7 +790,6 @@ def mini_app():
     if user.get("status") == "banned":
         return Response("<h3>Доступ запрещён</h3>", mimetype="text/html")
 
-    # Данные для шаблона
     events = db.get_published_events()
     for e in events:
         end_iso = str(e.get("end_date", ""))
@@ -709,37 +802,38 @@ def mini_app():
             no = float(m["total_no_reserve"])
             total = yes + no
             yp = (no / total) if total > 0 else 0.5
-            volume = max(0.0, total - 2000.0)  # «заведённые» кредиты в пул сверх стартовых
+            volume = max(0.0, total - 2000.0)
             markets[m["option_index"]] = {"yes_price": yp, "volume": volume, "end_short": e["end_short"]}
         e["markets"] = markets
 
     return render_template_string(MINI_APP_HTML, events=events, enumerate=enumerate)
 
 
-# ---------- API (все требуют подпись и status=approved) ----------
+# ---------- API ----------
 @app.get("/api/me")
 def api_me():
-    chat_id = request.args.get("chat_id", type=int)
-    sig = request.args.get("sig", "")
-    if not chat_id or not verify_sig(chat_id, sig):
-        return jsonify(success=False, error="bad_sig"), 403
+    chat_id, err = auth_chat_id_from_request()
+    if err:
+        return jsonify(success=False, error=err), 403
+
     u = db.get_user(chat_id)
     if not u:
         return jsonify(success=False, error="user_not_found"), 404
     if u.get("status") != "approved":
         return jsonify(success=False, error="not_approved"), 403
+
     positions = db.get_user_positions(chat_id)
     return jsonify(success=True, user={"chat_id": chat_id, "balance": u.get("balance", 0)}, positions=positions)
 
 
 @app.post("/api/market/buy")
 def api_market_buy():
+    chat_id, err = auth_chat_id_from_request()
+    if err:
+        return jsonify(success=False, error=err), 403
+
     payload = request.get_json(silent=True) or {}
     try:
-        chat_id = int(payload.get("chat_id"))
-        sig = str(payload.get("sig") or "")
-        if not verify_sig(chat_id, sig):
-            return jsonify(success=False, error="bad_sig"), 403
         event_uuid = str(payload.get("event_uuid"))
         option_index = int(payload.get("option_index"))
         side = str(payload.get("side"))
@@ -747,11 +841,11 @@ def api_market_buy():
     except Exception:
         return jsonify(success=False, error="bad_payload"), 400
 
-    result, err = db.trade_buy(
+    result, err2 = db.trade_buy(
         chat_id=chat_id, event_uuid=event_uuid, option_index=option_index, side=side, amount=amount
     )
-    if err:
-        return jsonify(success=False, error=err), 400
+    if err2:
+        return jsonify(success=False, error=err2), 400
 
     return jsonify(
         success=True,
@@ -771,10 +865,9 @@ def api_market_buy():
 
 @app.get("/api/userpic")
 def api_userpic():
-    chat_id = request.args.get("chat_id", type=int)
-    sig = request.args.get("sig", "")
-    if not chat_id or not verify_sig(chat_id, sig):
-        return "bad_sig", 403
+    chat_id, err = auth_chat_id_from_request()
+    if err:
+        return "bad_auth", 403
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/getUserProfilePhotos"
         r = requests.get(url, params={"user_id": chat_id, "limit": 1}, timeout=10)
@@ -801,6 +894,7 @@ def api_userpic():
 
 @app.get("/api/leaderboard")
 def api_leaderboard():
+    # Лидерборд публичен; init можно игнорировать, но он теперь приходит — это ок
     period = (request.args.get("period") or "week").lower()
     if period == "month":
         bounds = db.month_current_bounds()
@@ -936,11 +1030,10 @@ def admin_panel():
 def admin_approve(chat_id: int):
     user = db.approve_user(chat_id)
     if user:
-        # Отправим пользователю кнопку Mini App
         sig = make_sig(chat_id)
         if sig:
             web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-            kb = { "inline_keyboard": [ [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}] ] }
+            kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]}
             send_message(chat_id, "✅ Ваша регистрация подтверждена! Добро пожаловать.", kb)
         return jsonify(success=True)
     return jsonify(success=False), 404
@@ -949,7 +1042,6 @@ def admin_approve(chat_id: int):
 @app.post("/admin/reject/<int:chat_id>")
 @requires_auth
 def admin_reject(chat_id: int):
-    # По требованию — НЕ уведомляем пользователя об отклонении
     ok = db.reject_user(chat_id)
     return jsonify(success=bool(ok))
 
