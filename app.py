@@ -9,7 +9,10 @@ from functools import wraps
 from collections import deque, defaultdict
 
 import requests
-from flask import Flask, request, render_template_string, jsonify, Response, stream_with_context, redirect, url_for
+from flask import (
+    Flask, request, render_template_string, jsonify, Response,
+    stream_with_context, redirect, url_for
+)
 
 from database import db  # имеет db.client (Supabase)
 
@@ -23,6 +26,10 @@ TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "change-me")
 ADMIN_BASIC_USER = os.getenv("ADMIN_BASIC_USER", "admin")
 ADMIN_BASIC_PASS = os.getenv("ADMIN_BASIC_PASS", "admin")
 WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # обязателен
+
+# --- Online tracking (in-memory) ---
+ONLINE_TTL_SEC = 120
+_ONLINE = {}  # chat_id -> last_ts
 
 
 # ---------- Admin auth ----------
@@ -203,47 +210,259 @@ def legal():
     return Response(LEGAL_HTML, mimetype="text/html")
 
 
-# ---------- Admin (basic) ----------
+# ---------- Admin (panels) ----------
 ADMIN_HTML = """
 <!doctype html><meta charset="utf-8">
 <title>Admin</title>
 <style>
- body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:24px auto;padding:0 16px;line-height:1.4;color:#222}
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;line-height:1.4;color:#222}
  h1{margin:0 0 12px} h2{margin:18px 0 8px}
- table{width:100%;border-collapse:collapse} th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
- .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef3ff;border:1px solid #d9e3ff}
+ .muted{color:#667085}
+ .row{display:flex;align-items:center;gap:8px}
+ form.inline{display:inline}
+ input[type=text], input[type=datetime-local], textarea{padding:8px;border:1px solid #e5e7eb;border-radius:8px}
+ textarea{width:100%;min-height:100px}
  .btn{border:0;border-radius:8px;padding:6px 10px;cursor:pointer}
- .ok{background:#e7f6ec;color:#116330} .no{background:#fdecec;color:#7a0b0b}
+ .ok{background:#e7f6ec;color:#116330} .no{background:#fdecec;color:#7a0b0b} .sec{background:#eef3ff;color:#0b285a}
+ table{width:100%;border-collapse:collapse;margin-bottom:16px}
+ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
+ tr:hover td{background:#fafafa}
+ a { color:#0b285a; text-decoration:none;}
+ .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef3ff;border:1px solid #d9e3ff}
+ .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+ .card{border:1px solid #eee;border-radius:12px;padding:12px}
+ .right{float:right}
+ .mb8{margin-bottom:8px}
 </style>
+
 <h1>Админ-панель</h1>
 <p class="pill">/health: OK</p>
-<h2>Заявки</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h2>Заявки</h2>
+    <form method="get" action="/admin" class="mb8">
+      <input type="text" name="q_pending" value="{{q_pending or ''}}" placeholder="поиск по логину/ID/username">
+      <button class="btn sec" type="submit">Искать</button>
+    </form>
+    <table>
+      <thead><tr><th>chat_id</th><th>login</th><th>username</th><th>created_at</th><th></th></tr></thead>
+      <tbody>
+      {% for u in pending %}
+        <tr>
+          <td>{{u.chat_id}}</td><td>{{u.login}}</td><td>@{{u.username or ''}}</td><td>{{u.created_at}}</td>
+          <td>
+            <a class="btn ok" href="/admin/approve?chat_id={{u.chat_id}}">Одобрить</a>
+            <a class="btn no" href="/admin/reject?chat_id={{u.chat_id}}">Отклонить</a>
+          </td>
+        </tr>
+      {% endfor %}
+      {% if not pending %}<tr><td colspan="5" class="muted">Нет заявок</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Онлайн (за 2 мин)</h2>
+    <form method="get" action="/admin" class="mb8">
+      <input type="text" name="q_online" value="{{q_online or ''}}" placeholder="поиск">
+      <button class="btn sec" type="submit">Искать</button>
+    </form>
+    <table>
+      <thead><tr><th>chat_id</th><th>login</th><th>username</th><th>balance</th><th>последняя активность</th></tr></thead>
+      <tbody>
+      {% for u in online %}
+        <tr onclick="location.href='/admin/user?chat_id={{u.chat_id}}'" style="cursor:pointer">
+          <td>{{u.chat_id}}</td><td>{{u.login}}</td><td>@{{u.username or ''}}</td><td>{{'%.2f'|format(u.balance or 0)}}</td><td>{{u.last_seen}}</td>
+        </tr>
+      {% endfor %}
+      {% if not online %}<tr><td colspan="5" class="muted">Пока пусто</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Одобренные</h2>
+    <form method="get" action="/admin" class="mb8">
+      <input type="text" name="q_approved" value="{{q_approved or ''}}" placeholder="поиск">
+      <button class="btn sec" type="submit">Искать</button>
+    </form>
+    <table>
+      <thead><tr><th>chat_id</th><th>login</th><th>username</th><th>balance</th><th>approved_at</th></tr></thead>
+      <tbody>
+      {% for u in approved %}
+        <tr onclick="location.href='/admin/user?chat_id={{u.chat_id}}'" style="cursor:pointer">
+          <td>{{u.chat_id}}</td><td>{{u.login}}</td><td>@{{u.username or ''}}</td><td>{{'%.2f'|format(u.balance or 0)}}</td><td>{{u.approved_at}}</td>
+        </tr>
+      {% endfor %}
+      {% if not approved %}<tr><td colspan="5" class="muted">Нет данных</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Забаненные</h2>
+    <form method="get" action="/admin" class="mb8">
+      <input type="text" name="q_banned" value="{{q_banned or ''}}" placeholder="поиск">
+      <button class="btn sec" type="submit">Искать</button>
+    </form>
+    <table>
+      <thead><tr><th>chat_id</th><th>login</th><th>username</th><th>updated_at</th><th></th></tr></thead>
+      <tbody>
+      {% for u in banned %}
+        <tr>
+          <td>{{u.chat_id}}</td><td>{{u.login}}</td><td>@{{u.username or ''}}</td><td>{{u.updated_at}}</td>
+          <td><a class="btn ok" href="/admin/unban?chat_id={{u.chat_id}}">Разбан</a></td>
+        </tr>
+      {% endfor %}
+      {% if not banned %}<tr><td colspan="5" class="muted">Нет забаненных</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Создать мероприятие</h2>
+  {% if msg %}<div class="pill">{{msg}}</div>{% endif %}
+  <form method="post" action="/admin/events/create">
+    <div class="row mb8">
+      <input type="text" name="name" placeholder="Название" required style="flex:1">
+      <input type="datetime-local" name="end_date" required>
+    </div>
+    <div class="mb8">
+      <textarea name="description" placeholder="Описание" required></textarea>
+    </div>
+    <div class="mb8">
+      <label class="muted">Варианты (по одному на строку)</label>
+      <textarea name="options" placeholder="Вариант 1\nВариант 2" required></textarea>
+    </div>
+    <div class="row mb8">
+      <input type="text" name="tags" placeholder="теги через запятую" style="flex:1">
+      <label class="row"><input type="checkbox" name="publish" checked>&nbsp;Опубликовать</label>
+    </div>
+    <button class="btn ok" type="submit">Создать</button>
+  </form>
+</div>
+"""
+
+ADMIN_USER_HTML = """
+<!doctype html><meta charset="utf-8">
+<title>User {{u.chat_id}}</title>
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px;margin:24px auto;padding:0 16px}
+ .row{display:flex;align-items:center;gap:8px}
+ .muted{color:#667085}
+ .btn{border:0;border-radius:8px;padding:6px 10px;cursor:pointer}
+ .ok{background:#e7f6ec;color:#116330} .no{background:#fdecec;color:#7a0b0b} .sec{background:#eef3ff;color:#0b285a}
+ input[type=number]{padding:8px;border:1px solid #e5e7eb;border-radius:8px;width:160px}
+ table{width:100%;border-collapse:collapse;margin-top:16px}
+ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
+ a { color:#0b285a; text-decoration:none;}
+</style>
+
+<a href="/admin" class="muted">← Назад</a>
+<h1>{{u.login or u.chat_id}}</h1>
+<p>@{{u.username or ''}} · chat_id: <b>{{u.chat_id}}</b> · Статус: <b>{{u.status}}</b></p>
+<p>Баланс: <b>{{'%.2f'|format(u.balance or 0)}}</b></p>
+
+<div class="row">
+  <form method="post" action="/admin/user/set_balance">
+    <input type="hidden" name="chat_id" value="{{u.chat_id}}">
+    <input type="number" step="0.01" name="new_balance" placeholder="новый баланс" required>
+    <button class="btn ok" type="submit">Изменить баланс</button>
+  </form>
+  {% if u.status != 'banned' %}
+    <a class="btn no" href="/admin/ban?chat_id={{u.chat_id}}">Забанить</a>
+  {% else %}
+    <a class="btn ok" href="/admin/unban?chat_id={{u.chat_id}}">Разбанить</a>
+  {% endif %}
+</div>
+
+<h2>Последние операции</h2>
 <table>
-  <thead><tr><th>chat_id</th><th>login</th><th>username</th><th>created_at</th><th>Actions</th></tr></thead>
+  <thead><tr><th>Дата</th><th>Сумма</th><th>Причина</th><th>order_id</th></tr></thead>
   <tbody>
-  {% for u in pending %}
+  {% for r in ledger %}
     <tr>
-      <td>{{u.chat_id}}</td><td>{{u.login}}</td><td>@{{u.username or ''}}</td><td>{{u.created_at}}</td>
-      <td>
-        <a class="btn ok" href="/admin/approve?chat_id={{u.chat_id}}">Одобрить</a>
-        <a class="btn no" href="/admin/reject?chat_id={{u.chat_id}}">Отклонить</a>
-      </td>
+      <td>{{r.created_at}}</td>
+      <td>{{'%.4f'|format(r.delta or 0)}}</td>
+      <td>{{r.reason}}</td>
+      <td>{{r.order_id or ''}}</td>
     </tr>
   {% endfor %}
-  {% if not pending %}<tr><td colspan="5" class="muted">Нет заявок</td></tr>{% endif %}
+  {% if not ledger %}<tr><td colspan="4" class="muted">Нет записей</td></tr>{% endif %}
   </tbody>
 </table>
 """
 
+
 @app.get("/admin")
 @requires_auth
 def admin_home():
-    pending = []
+    # queries
+    q_pending = request.args.get("q_pending", "").strip()
+    q_approved = request.args.get("q_approved", "").strip()
+    q_banned = request.args.get("q_banned", "").strip()
+    q_online = request.args.get("q_online", "").strip()
+    msg = request.args.get("msg", "")
+
+    # pending
     try:
-        pending = db.get_pending_users()
-    except Exception as e:
-        print("[/admin] error:", e)
-    return render_template_string(ADMIN_HTML, pending=pending)
+        if q_pending:
+            pending = db.search_users("pending", q=q_pending, sort="created_at")
+        else:
+            pending = db.get_pending_users()
+    except Exception:
+        pending = []
+
+    # approved
+    try:
+        if q_approved:
+            approved = db.search_users("approved", q=q_approved, sort="balance")
+        else:
+            approved = db.get_approved_users()
+    except Exception:
+        approved = []
+
+    # banned
+    try:
+        if q_banned:
+            banned = db.search_users("banned", q=q_banned, sort="")
+        else:
+            banned = db.get_banned_users()
+    except Exception:
+        banned = []
+
+    # online (из одобренных), last_seen в памяти
+    now = time.time()
+    online_ids = [cid for cid, ts in list(_ONLINE.items()) if now - ts <= ONLINE_TTL_SEC]
+    online = []
+    if online_ids:
+        # отфильтруем по поиску
+        # получим через search_users? Нет статуса "online". Возьмем approved и отфильтруем по chat_id IN
+        ap = db.get_approved_users() or []
+        amap = {int(u["chat_id"]): u for u in ap if u and "chat_id" in u}
+        for cid in online_ids:
+            u = amap.get(int(cid))
+            if not u:
+                continue
+            if q_online:
+                needle = q_online.lower()
+                if not (needle in str(u.get("login", "")).lower()
+                        or needle in str(u.get("username", "")).lower()
+                        or needle in str(u.get("chat_id", ""))):
+                    continue
+            item = dict(u)
+            item["last_seen"] = datetime.fromtimestamp(_ONLINE[cid], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            online.append(item)
+
+    return render_template_string(
+        ADMIN_HTML,
+        pending=pending, approved=approved, banned=banned, online=online,
+        q_pending=q_pending, q_approved=q_approved, q_banned=q_banned, q_online=q_online,
+        msg=msg
+    )
+
 
 @app.get("/admin/approve")
 @requires_auth
@@ -253,6 +472,7 @@ def admin_approve():
         db.approve_user(chat_id)
     return redirect(url_for("admin_home"))
 
+
 @app.get("/admin/reject")
 @requires_auth
 def admin_reject():
@@ -260,6 +480,75 @@ def admin_reject():
     if chat_id:
         db.reject_user(chat_id)
     return redirect(url_for("admin_home"))
+
+
+@app.get("/admin/ban")
+@requires_auth
+def admin_ban():
+    chat_id = request.args.get("chat_id", type=int)
+    if chat_id:
+        db.ban_user(chat_id)
+    return redirect(url_for("admin_home"))
+
+
+@app.get("/admin/unban")
+@requires_auth
+def admin_unban():
+    chat_id = request.args.get("chat_id", type=int)
+    if chat_id:
+        db.unban_user(chat_id)
+    return redirect(url_for("admin_home"))
+
+
+@app.get("/admin/user")
+@requires_auth
+def admin_user_details():
+    chat_id = request.args.get("chat_id", type=int)
+    if not chat_id:
+        return redirect(url_for("admin_home"))
+    u = db.get_user(chat_id) or {}
+    ledger = db.get_ledger_for_user(chat_id, limit=50) or []
+    return render_template_string(ADMIN_USER_HTML, u=u, ledger=ledger)
+
+
+@app.post("/admin/user/set_balance")
+@requires_auth
+def admin_user_set_balance():
+    try:
+        chat_id = int(request.form.get("chat_id"))
+        new_balance = float(request.form.get("new_balance"))
+    except Exception:
+        return redirect(url_for("admin_user_details", chat_id=request.form.get("chat_id", "")))
+    db.admin_set_balance_via_ledger(chat_id, new_balance)
+    return redirect(url_for("admin_user_details", chat_id=chat_id))
+
+
+@app.post("/admin/events/create")
+@requires_auth
+def admin_events_create():
+    name = (request.form.get("name") or "").strip()
+    description = (request.form.get("description") or "").strip()
+    options_raw = request.form.get("options") or ""
+    tags_raw = request.form.get("tags") or ""
+    end_date = (request.form.get("end_date") or "").strip()
+    publish = bool(request.form.get("publish"))
+
+    # parse options -> [{"text": "..."}]
+    opts = [line.strip() for line in options_raw.replace("\r", "").split("\n")]
+    opts = [o for o in opts if o]
+    options = [{"text": o} for o in opts]
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+
+    ok, err = db.create_event_with_markets(
+        name=name,
+        description=description,
+        options=options,
+        end_date=end_date,
+        tags=tags,
+        publish=publish,
+    )
+    msg = "Событие создано" if ok else f"Ошибка: {err or 'unknown'}"
+    return redirect(url_for("admin_home", msg=msg))
 
 
 # ---------- Telegram webhook ----------
@@ -368,7 +657,6 @@ MINI_APP_HTML = """
     }
     .hover-spot:hover::after{ opacity:1; }
 
-    /* header */
     .header { display:flex; align-items:center; gap:12px; }
     .avatar { width: 56px; height: 56px; border-radius: 50%; border: 2px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,.06); object-fit:cover; }
     .avatarPH { width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;
@@ -384,26 +672,21 @@ MINI_APP_HTML = """
     .card-head { display:flex; align-items:center; justify-content:space-between; transition: transform .12s ease; }
     .card-head:active { transform: scale(0.98); }
 
-    /* charts */
     .hist { margin-top:8px; padding:10px; border:1px solid #eee; border-radius:10px;
             opacity:0; max-height:0; overflow:hidden; transition: opacity .25s ease, max-height .25s ease; }
     .hist.show { opacity:1; max-height:800px; }
 
     .legend { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 0; font-size:12px; color:#444; }
-    .legend .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
 
-    /* range buttons (rounded) */
     .range { display:flex; gap:6px; margin-bottom:6px; background:#f0f2f5; padding:4px; border-radius:999px; }
     .range button { border:0; border-radius:999px; padding:6px 10px; background:transparent; cursor:pointer; font-size:12px; color:#444; }
     .range button.active { background:#fff; box-shadow:0 2px 6px rgba(0,0,0,.08); color:#111; }
 
-    /* pretty slider for leaders */
     .seg2 { position:relative; display:inline-grid; grid-template-columns: 1fr 1fr; border-radius:999px; background:#eef2f9; padding:4px; gap:4px; }
     .seg2 .thumb { position:absolute; top:4px; bottom:4px; width:calc(50% - 4px); border-radius:999px; background:#fff; box-shadow:0 4px 10px rgba(0,0,0,.12); transform:translateX(0); transition:transform .18s ease; }
     .seg2 button { position:relative; z-index:1; border:0; background:transparent; padding:6px 16px; border-radius:999px; font-weight:700; cursor:pointer; color:#334155; }
     .seg2 button.active { color:#0b285a; }
 
-    /* footer */
     .footer { margin: 40px 6px 10px; text-align:center; }
     .footer a { color:#9aa; text-decoration:none; font-size:12px; opacity:.6; }
     .footer a:hover { opacity:.9; }
@@ -411,7 +694,6 @@ MINI_APP_HTML = """
 </head>
 <body>
 
-  <!-- Header -->
   <div class="header">
     <div id="avaPH" class="avatarPH">U</div>
     <img id="avaIMG" class="avatar" alt="avatar" style="display:none">
@@ -421,7 +703,6 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Активные ставки -->
   <div id="wrap-active" class="section">
     <div id="head-active" class="section-head hover-spot" onclick="toggleSection('active')">
       <span class="section-title">Активные ставки</span>
@@ -436,7 +717,6 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Мероприятия -->
   <div id="wrap-events" class="section">
     <div id="head-events" class="section-head hover-spot" onclick="toggleSection('events')">
       <span class="section-title">Мероприятия</span>
@@ -451,7 +731,6 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Архив ставок -->
   <div id="wrap-arch" class="section">
     <div id="head-arch" class="section-head hover-spot" onclick="toggleSection('arch')">
       <span class="section-title">Прошедшие ставки (архив)</span>
@@ -466,7 +745,6 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Таблица лидеров -->
   <div id="wrap-leaders" class="section">
     <div id="head-leaders" class="section-head hover-spot" onclick="toggleLeaders()">
       <span class="section-title">Таблица лидеров</span>
@@ -485,12 +763,10 @@ MINI_APP_HTML = """
     </div>
   </div>
 
-  <!-- Footer -->
   <div class="footer">
     <a href="/legal" target="_blank" rel="noopener">Правила и политика конфиденциальности</a>
   </div>
 
-  <!-- Покупка -->
   <div id="modalBg" class="modal-bg" style="position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center;">
     <div class="modal" style="background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px;">
       <h3 id="mTitle" style="margin:0 0 8px 0;">Покупка</h3>
@@ -521,6 +797,19 @@ MINI_APP_HTML = """
       return null;
     }
 
+    // heartbeat -> для онлайн-списка в админке
+    async function heartbeat(){
+      const cid = getChatId();
+      if (!cid) return;
+      const params = new URLSearchParams({chat_id: cid});
+      if (SIG) params.append('sig', SIG);
+      if (INIT) params.append('init', tg.initData);
+      try { await fetch('/api/ping?' + params.toString(), {method:'POST'}); } catch(_){}
+    }
+    setInterval(heartbeat, 30000);
+    document.addEventListener('visibilitychange', ()=>{ if (!document.hidden) heartbeat(); });
+    window.addEventListener('load', heartbeat);
+
     // radial hover
     document.addEventListener('pointermove', (e) => {
       const head = e.target.closest('.hover-spot');
@@ -530,7 +819,6 @@ MINI_APP_HTML = """
       head.style.setProperty('--spot-y', (e.clientY - rect.top) + 'px');
     });
 
-    // sections
     function toggleSection(name){
       const b = document.getElementById("section-"+name);
       const c = document.getElementById("caret-"+name);
@@ -549,7 +837,6 @@ MINI_APP_HTML = """
       else { b.style.display="block"; c.textContent="▾"; h.classList.remove("collapsed"); if (!toggleLeaders._loaded){ fetchLeaderboard('week'); toggleLeaders._loaded=true; } }
     }
 
-    // header fill
     function fillHeader(login, balance){
       const ph = document.getElementById('avaPH');
       const img= document.getElementById('avaIMG');
@@ -587,28 +874,22 @@ MINI_APP_HTML = """
       }
     }
 
-    // bookmarks
     const BMS = JSON.parse(localStorage.getItem('bookmarks_v1')||'{"events":{},"active":{},"arch":{}}');
     function saveBMS(){ localStorage.setItem('bookmarks_v1', JSON.stringify(BMS)); }
     function isBM(cat, key){ return !!(BMS[cat] && BMS[cat][key]); }
     function toggleBM(cat, key, btn){ BMS[cat][key] = !isBM(cat,key); saveBMS(); if(btn){ btn.classList.toggle('active', BMS[cat][key]); } }
 
-    // Only-bookmarks flags
     const ONLY = JSON.parse(localStorage.getItem('onlybm_v1')||'{"events":false,"active":false,"arch":false}');
     function saveONLY(){ localStorage.setItem('onlybm_v1', JSON.stringify(ONLY)); }
 
-    // number formatting RU (credits)
     function fmtCredits(n){
-      const abs = Math.abs(n);
-      const sign = n < 0 ? "-" : "";
-      const fmt = (x)=> x.toFixed(2).replace('.', ','); // 90,82
-      if (abs < 1000) return sign + fmt(abs);
-      if (abs < 1_000_000) return sign + (Math.round(abs/100)/10).toString().replace('.', ',') + " тыс.";
-      if (abs < 1_000_000_000) return sign + (Math.round(abs/100_000)/10).toString().replace('.', ',') + " млн";
-      return sign + (Math.round(abs/100_000_000)/10).toString().replace('.', ',') + " млрд";
+      const abs = Math.abs(n); const sign = n < 0 ? "-" : ""; const toRU = x=>String(x.toFixed(2)).replace('.', ',');
+      if (abs < 1000) return sign + toRU(abs);
+      if (abs < 1_000_000) return sign + String(Math.round(abs/100)/10).replace('.', ',') + " тыс.";
+      if (abs < 1_000_000_000) return sign + String(Math.round(abs/100_000)/10).replace('.', ',') + " млн";
+      return sign + String(Math.round(abs/100_000_000)/10).replace('.', ',') + " млрд";
     }
 
-    // Render events (server injects __events)
     const __events = {{ events|tojson|safe }};
     function renderEvents(evts){
       const list = document.getElementById('events-list');
@@ -629,24 +910,16 @@ MINI_APP_HTML = """
         head.onclick = ()=> toggleHistory(card, e);
 
         const bodyWrap = document.createElement('div');
-        const pDesc = document.createElement('p');
-        pDesc.className = 'muted desc';
-        pDesc.textContent = e.description || '';
+        const pDesc = document.createElement('p'); pDesc.className = 'muted desc'; pDesc.textContent = e.description || '';
         bodyWrap.appendChild(pDesc);
-        if (e.tags && e.tags.length){
-          const pTags = document.createElement('div');
-          pTags.className = 'muted';
-          pTags.textContent = `Теги: ${e.tags.join(', ')}`;
-          bodyWrap.appendChild(pTags);
-        }
+        if (e.tags && e.tags.length){ const pTags = document.createElement('div'); pTags.className = 'muted'; pTags.textContent = `Теги: ${e.tags.join(', ')}`; bodyWrap.appendChild(pTags); }
 
         const optionsWrap = document.createElement('div');
         (e.options||[]).forEach((opt, idx)=>{
           const md = (e.markets && e.markets[idx]) || {yes_price:0.5, volume:0, end_short:e.end_short, resolved:false, winner_side:null};
           const yes_pct = Math.round((md.yes_price||0.5)*100);
           const row = document.createElement('div');
-          row.className = 'opt';
-          row.dataset.option = String(idx);
+          row.className = 'opt'; row.dataset.option = String(idx);
           row.innerHTML = `
             <div class="opt-title">${opt.text}</div>
             <div class="prob" title="Вероятность ДА">${md.resolved ? ((md.winner_side==='yes')?'ДА ✓':'НЕТ ✓') : (yes_pct+'%')}</div>
@@ -656,13 +929,12 @@ MINI_APP_HTML = """
               <button class="btn no  buy-btn" data-event="${e.event_uuid}" data-index="${idx}" data-side="no"  data-text="${opt.text}">НЕТ</button>`}
             </div>
             <div class="meta-left">${fmtCredits(md.volume||0)} кредитов</div>
-            <div class="meta-right">До ${md.end_short}</div>`;
+            <div class="meta-right">До ${e.end_short}</div>`;
           optionsWrap.appendChild(row);
         });
 
         const hist = document.createElement('div');
-        hist.className = 'hist';
-        hist.style.display = 'none';
+        hist.className = 'hist'; hist.style.display = 'none';
         hist.innerHTML = `
           <div class="row" style="justify-content:space-between; margin-bottom:6px;">
             <div class="muted">Динамика цены</div>
@@ -673,39 +945,26 @@ MINI_APP_HTML = """
           <canvas width="600" height="160" style="width:100%; max-width:100%;"></canvas>
           <div class="legend" id="lg-${e.event_uuid}"></div>`;
 
-        card.appendChild(head);
-        card.appendChild(bodyWrap);
-        card.appendChild(hist);
-        card.appendChild(optionsWrap);
-
+        card.appendChild(head); card.appendChild(bodyWrap); card.appendChild(hist); card.appendChild(optionsWrap);
         list.appendChild(card);
       });
     }
     renderEvents(__events);
 
-    // один график на мероприятие: несколько линий (по числу опций)
     const PALETTE = ["#1976d2","#2e7d32","#c62828","#8e24aa","#ef6c00","#00897b","#5d4037","#3949ab"];
     function toggleHistory(card, e){
       const hist = card.querySelector('.hist');
-      if (hist.style.display === 'none'){
-        hist.style.display = 'block';
-        requestAnimationFrame(()=> hist.classList.add('show'));
-        loadEventChart(hist, e);
-      } else {
-        hist.classList.remove('show');
-        setTimeout(()=>{ hist.style.display = 'none'; }, 250);
-      }
+      if (hist.style.display === 'none'){ hist.style.display = 'block'; requestAnimationFrame(()=> hist.classList.add('show')); loadEventChart(hist, e); }
+      else { hist.classList.remove('show'); setTimeout(()=>{ hist.style.display = 'none'; }, 250); }
     }
     function loadEventChart(container, e){
       const rangeEl = container.querySelector('.range');
       const canvas = container.querySelector('canvas');
-      const legend = container.querySelector('legend');
-      const evu = e.event_uuid;
       const draw = async (rng)=>{
         const datasets = [];
         const opts = e.options || [];
         for (let idx=0; idx<opts.length; idx++){
-          const url = `/api/market/history?event_uuid=${encodeURIComponent(evu)}&option_index=${idx}&range=${rng}`;
+          const url = `/api/market/history?event_uuid=${encodeURIComponent(e.event_uuid)}&option_index=${idx}&range=${rng}`;
           try{
             const r = await fetch(url); const data = await r.json();
             if (!r.ok || !data.success || !data.points) continue;
@@ -728,9 +987,7 @@ MINI_APP_HTML = """
       ctx.clearRect(0,0,W,H);
       if (!datasets.length){ ctx.fillStyle='#666'; ctx.fillText('Нет данных', 10, 20); return; }
       let xmin=Infinity, xmax=-Infinity;
-      datasets.forEach(ds=>{
-        ds.data.forEach(p=>{ if (p.x<xmin) xmin=p.x; if (p.x>xmax) xmax=p.x; });
-      });
+      datasets.forEach(ds=>{ ds.data.forEach(p=>{ if (p.x<xmin) xmin=p.x; if (p.x>xmax) xmax=p.x; }); });
       if (!isFinite(xmin) || !isFinite(xmax)){ xmin = Date.now()-3600e3; xmax = Date.now(); }
       ctx.strokeStyle='#eee'; ctx.lineWidth=1;
       for (let i=0;i<=4;i++){ const y = P + (H-2*P)*(i/4); ctx.beginPath(); ctx.moveTo(P,y); ctx.lineTo(W-P,y); ctx.stroke(); }
@@ -746,7 +1003,6 @@ MINI_APP_HTML = """
       });
     }
 
-    // Filters
     function attachFilters(){
       const qA = document.getElementById('qActive');
       const qR = document.getElementById('qArch');
@@ -756,8 +1012,7 @@ MINI_APP_HTML = """
       const btnArch   = document.getElementById('btnArchOnlyBM');
 
       function filterActive(){
-        const needle = (qA.value||"").toLowerCase();
-        const onlyBM = !!ONLY.active;
+        const needle = (qA.value||"").toLowerCase(); const onlyBM = !!ONLY.active;
         const cards = document.getElementById('active').querySelectorAll('.card');
         cards.forEach(c=>{
           const key = c.dataset.key || '';
@@ -767,8 +1022,7 @@ MINI_APP_HTML = """
         });
       }
       function filterArch(){
-        const needle = (qR.value||"").toLowerCase();
-        const onlyBM = !!ONLY.arch;
+        const needle = (qR.value||"").toLowerCase(); const onlyBM = !!ONLY.arch;
         const rows = document.getElementById('arch').querySelectorAll('.card');
         rows.forEach(c=>{
           const key = c.dataset.key || '';
@@ -778,8 +1032,7 @@ MINI_APP_HTML = """
         });
       }
       function filterEvents(){
-        const needle = (qE.value||"").toLowerCase();
-        const onlyBM = !!ONLY.events;
+        const needle = (qE.value||"").toLowerCase(); const onlyBM = !!ONLY.events;
         const cards = document.getElementById('events-list').children;
         [...cards].forEach(c=>{
           const key = c.dataset.event || '';
@@ -804,30 +1057,18 @@ MINI_APP_HTML = """
       if (btnArch)   btnArch.addEventListener('click',   ()=>{ ONLY.arch   = !ONLY.arch;   saveONLY(); syncBtns(); filterArch(); });
       syncBtns();
 
+      filterActive(); filterEvents(); filterArch();
+
       // Лидеры — слайдер
-      const seg2 = document.getElementById('seg2');
-      const thumb = document.getElementById('seg2Thumb');
+      const seg2 = document.getElementById('seg2'); const thumb = document.getElementById('seg2Thumb');
       if (seg2 && thumb){
         const btns = seg2.querySelectorAll('button');
-        function setActive(idx){
-          btns.forEach((b,i)=> b.classList.toggle('active', i===idx));
-          thumb.style.transform = `translateX(${idx*100}%)`;
-        }
-        seg2.addEventListener('click', (e)=>{
-          const b = e.target.closest('button'); if (!b) return;
-          const idx = [...btns].indexOf(b);
-          setActive(idx);
-          const period = b.dataset.period || 'week';
-          fetchLeaderboard(period);
-        });
+        function setActive(idx){ btns.forEach((b,i)=> b.classList.toggle('active', i===idx)); thumb.style.transform = `translateX(${idx*100}%)`; }
+        seg2.addEventListener('click', (e)=>{ const b = e.target.closest('button'); if (!b) return; const idx = [...btns].indexOf(b); setActive(idx); fetchLeaderboard(b.dataset.period||'week'); });
         setActive(0);
       }
-
-      // Первичная фильтрация
-      filterActive(); filterEvents(); filterArch();
     }
 
-    // Profile (positions + archive)
     async function fetchMe(){
       const cid = getChatId();
       const activeDiv = document.getElementById("active");
@@ -849,15 +1090,13 @@ MINI_APP_HTML = """
 
         fillHeader(data.user.login || "", Number(data.user.balance));
 
-        // Active
         activeDiv.innerHTML = "";
         const pos = data.positions||[];
         if (!pos.length){ activeDiv.innerHTML = `<div class="muted">У вас пока нет активных ставок.</div>`; }
         else{
-          pos.forEach((p, i)=>{
+          pos.forEach((p)=>{
             const qty = +p.quantity, avg=+p.average_price;
-            const el = document.createElement('div');
-            el.className = 'card';
+            const el = document.createElement('div'); el.className = 'card';
             el.dataset.key = (p.event_name||'')+'|'+(p.option_text||'')+'|'+(p.share_type||'');
             el.innerHTML = `
               <div class="row" style="justify-content:space-between;">
@@ -882,27 +1121,20 @@ MINI_APP_HTML = """
         }
 
         attachFilters();
-
-        // Archive
         await renderArchive(archDiv, cid, data.archive||[]);
-
       }catch(e){
         document.getElementById("active").textContent = "Сетевая ошибка.";
         document.getElementById("arch").textContent = "Сетевая ошибка.";
       }
     }
 
-    // Архив (если в некоторых строках нет названия — сервер уже обогащает; здесь просто рендер)
     async function renderArchive(container, chatId, rows){
       container.innerHTML = "";
       if (!rows.length){ container.innerHTML = `<div class="muted">Архив пуст.</div>`; return; }
-      rows.forEach((it, idx)=>{
-        const win = !!it.is_win;
-        const sign = win ? "+" : "−";
-        const amount = Number(it.payout||0).toFixed(2);
+      rows.forEach((it)=>{
+        const win = !!it.is_win; const sign = win ? "+" : "−"; const amount = Number(it.payout||0).toFixed(2);
         const when = (it.resolved_at||"").slice(0,16);
-        const el = document.createElement('div');
-        el.className = 'card';
+        const el = document.createElement('div'); el.className = 'card';
         el.dataset.key = (it.event_name||'')+'|'+(it.option_text||'')+'|'+(it.winner_side||'');
         el.style.background = win ? "#eaf7ef" : "#fdecec";
         el.innerHTML = `
@@ -925,7 +1157,6 @@ MINI_APP_HTML = """
       if (qR) qR.dispatchEvent(new Event('input'));
     }
 
-    // Leaders
     async function fetchLeaderboard(period='week'){
       const lb = document.getElementById("lb-container");
       const rng= document.getElementById("lb-range");
@@ -958,7 +1189,6 @@ MINI_APP_HTML = """
       }
     }
 
-    // Buying
     let buyCtx=null;
     document.addEventListener('click',(ev)=>{
       const btn = ev.target.closest('.buy-btn'); if(!btn) return;
@@ -988,6 +1218,9 @@ MINI_APP_HTML = """
     (async function init(){
       if (tg) tg.ready();
       await fetchMe();
+      // инициализируем слайдер лидеров
+      const seg2 = document.getElementById('seg2');
+      if (seg2) fetchLeaderboard('week');
     })();
   </script>
 </body>
@@ -1091,6 +1324,15 @@ def mini_app():
     return render_template_string(MINI_APP_HTML, events=events, enumerate=enumerate)
 
 
+@app.post("/api/ping")
+def api_ping():
+    chat_id = request.args.get("chat_id", type=int) or request.form.get("chat_id", type=int)
+    if chat_id:
+        _ONLINE[chat_id] = time.time()
+        return jsonify(ok=True)
+    return jsonify(ok=False), 400
+
+
 @app.get("/api/me")
 def api_me():
     chat_id, err = auth_chat_id_from_request()
@@ -1104,7 +1346,7 @@ def api_me():
     positions = db.get_user_positions(chat_id)
     archive = db.get_user_archive(chat_id)
 
-    # Доп. обогащение архива: если нет event_name — подставляем по последним ордерам пользователя
+    # Обогащение названий, если отсутствуют (по ордерам)
     if any((not r.get("event_name")) or r.get("event_name") in ("—", "-") for r in archive):
         try:
             data, status = api_user_orders_internal(chat_id=chat_id)
@@ -1116,13 +1358,11 @@ def api_me():
                 evus = sorted({x["event_uuid"] for x in pm if x.get("event_uuid")})
                 evs = db.client.table("events").select("event_uuid, name, options").in_("event_uuid", evus).execute().data or []
                 ev_map = {x["event_uuid"]: x for x in evs}
-
                 def ts(s):
                     try:
                         return datetime.fromisoformat(str(s).replace(" ", "T")).timestamp()
                     except Exception:
                         return 0.0
-
                 ords = [{"market_id": int(o["market_id"]), "ts": ts(o["created_at"])} for o in orders if o.get("market_id") is not None]
                 ords.sort(key=lambda z: z["ts"])
                 for r in archive:
@@ -1188,7 +1428,6 @@ def api_userpic():
         return Response(status=204)
 
 
-# Вспомогательный endpoint для ордеров пользователя
 @app.get("/api/user_orders")
 def api_user_orders():
     chat_id, err = auth_chat_id_from_request()
@@ -1240,7 +1479,7 @@ def api_leaderboard():
         label = _label_ru(start, end, "За неделю")
 
     items_raw = db.leaderboard(start, end, limit=50) if hasattr(db, "leaderboard") else []
-    # Доход (не отрицательный): берём выплаты (payouts), обрезаем снизу 0
+    # доход = выплаты, обрезаем снизу 0
     items = []
     for it in items_raw:
         earned = max(float(it.get("payouts", 0) or 0), 0.0)
@@ -1253,11 +1492,6 @@ def api_leaderboard():
 # ---------- Market history (for charts) ----------
 @app.get("/api/market/history")
 def api_market_history():
-    """
-    Возвращает точки истории цены ДА для конкретного рынка (event_uuid + option_index).
-    Расчёт по market_orders с проигрыванием AMM (x*y=k) от стартовых резервов 1000/1000.
-    Параметры: event_uuid, option_index, range: 1h|6h|1d|1w|1m|all
-    """
     event_uuid = request.args.get("event_uuid", type=str)
     option_index = request.args.get("option_index", type=int)
     rng = (request.args.get("range") or "1d").lower()
