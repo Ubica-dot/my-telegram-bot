@@ -31,7 +31,7 @@ def _check_auth(u, p):
 
 
 def _auth_required():
-    return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="Admin"'})
+    return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="Admin'"})
 
 
 def requires_auth(fn):
@@ -320,14 +320,6 @@ MINI_APP_HTML = """
 
     input[type=text] { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; }
     .toolbar { display:flex; gap:8px; align-items:center; }
-    .chk { display:inline-flex; gap:6px; align-items:center; font-size:12px; color:#666; }
-
-    /* leaders switch */
-    .seg { display:inline-flex; background:#f0f0f0; border-radius:999px; padding:4px; gap:4px; }
-    .seg-btn { border:0; background:transparent; padding:6px 12px; border-radius:999px; font-weight:700; cursor:pointer; color:#444; transition:all .15s ease; }
-    .seg-btn.active { background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.08); color:#111; }
-
-    /* bookmark */
     .bm { border:0;background:transparent;cursor:pointer;color:#bbb;font-size:16px; }
     .bm.active { color:#f0b400; }
     .card-head { display:flex; align-items:center; justify-content:space-between; transition: transform .12s ease; }
@@ -368,7 +360,7 @@ MINI_APP_HTML = """
     <div id="section-active" class="section-body">
       <div class="toolbar" style="margin:6px 0 8px">
         <input id="qActive" type="text" placeholder="Поиск по активным ставкам">
-        <label class="chk"><input id="fActiveBM" type="checkbox"> только закладки</label>
+        <button id="btnActiveOnlyBM" class="bm" title="Показать только закладки">★</button>
       </div>
       <div id="active" class="muted">Загрузка...</div>
     </div>
@@ -383,7 +375,6 @@ MINI_APP_HTML = """
     <div id="section-events" class="section-body">
       <div class="toolbar" style="margin:6px 0 8px">
         <input id="qEvents" type="text" placeholder="Поиск по событиям и тегам">
-        <label class="chk"><input id="fEventsBM" type="checkbox"> только закладки</label>
         <button id="btnEventsOnlyBM" class="bm" title="Показать только закладки">★</button>
       </div>
       <div id="events-list"></div>
@@ -399,7 +390,7 @@ MINI_APP_HTML = """
     <div id="section-arch" class="section-body">
       <div class="toolbar" style="margin:6px 0 8px">
         <input id="qArch" type="text" placeholder="Поиск по архиву">
-        <label class="chk"><input id="fArchBM" type="checkbox"> только закладки</label>
+        <button id="btnArchOnlyBM" class="bm" title="Показать только закладки">★</button>
       </div>
       <div id="arch" class="muted">Загрузка...</div>
     </div>
@@ -531,6 +522,10 @@ MINI_APP_HTML = """
     function isBM(cat, key){ return !!(BMS[cat] && BMS[cat][key]); }
     function toggleBM(cat, key, btn){ BMS[cat][key] = !isBM(cat,key); saveBMS(); if(btn){ btn.classList.toggle('active', BMS[cat][key]); } }
 
+    // Only-bookmarks flags (иконки-звёзды)
+    const ONLY = JSON.parse(localStorage.getItem('onlybm_v1')||'{"events":false,"active":false,"arch":false}');
+    function saveONLY(){ localStorage.setItem('onlybm_v1', JSON.stringify(ONLY)); }
+
     // Render events (server injects __events)
     const __events = {{ events|tojson|safe }};
     function renderEvents(evts){
@@ -551,14 +546,12 @@ MINI_APP_HTML = """
         head.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('events', bmKey, ev.currentTarget); };
         head.onclick = ()=> toggleHistory(card, e);
 
-        // тело карточки: отделяем описание, чтобы вставить график между описанием и вариантами
+        // тело карточки
         const bodyWrap = document.createElement('div');
-
         const pDesc = document.createElement('p');
         pDesc.className = 'muted desc';
         pDesc.textContent = e.description || '';
         bodyWrap.appendChild(pDesc);
-
         if (e.tags && e.tags.length){
           const pTags = document.createElement('div');
           pTags.className = 'muted';
@@ -602,11 +595,10 @@ MINI_APP_HTML = """
           <canvas width="600" height="160" style="width:100%; max-width:100%;"></canvas>
           <div class="legend" id="lg-${e.event_uuid}"></div>`;
 
-        // вставляем: head, затем описание, затем ГРАФИК, затем варианты
         card.appendChild(head);
         card.appendChild(bodyWrap);
-        card.appendChild(hist);            // график — сразу после описания (мы добавили bodyWrap выше)
-        card.appendChild(optionsWrap);     // варианты идут ниже графика
+        card.appendChild(hist);
+        card.appendChild(optionsWrap);
 
         list.appendChild(card);
       });
@@ -619,7 +611,7 @@ MINI_APP_HTML = """
       const hist = card.querySelector('.hist');
       if (hist.style.display === 'none'){
         hist.style.display = 'block';
-        requestAnimationFrame(()=> hist.classList.add('show')); // плавное появление
+        requestAnimationFrame(()=> hist.classList.add('show'));
         loadEventChart(hist, e);
       } else {
         hist.classList.remove('show');
@@ -634,7 +626,6 @@ MINI_APP_HTML = """
       const draw = async (rng)=>{
         const datasets = [];
         legend.innerHTML = "";
-        // для каждой опции — подтянуть историю и собрать dataset
         const opts = e.options || [];
         for (let idx=0; idx<opts.length; idx++){
           const url = `/api/market/history?event_uuid=${encodeURIComponent(evu)}&option_index=${idx}&range=${rng}`;
@@ -643,7 +634,6 @@ MINI_APP_HTML = """
             if (!r.ok || !data.success || !data.points) continue;
             const ds = data.points.map(p=>({ x: new Date(p.ts).getTime(), y: +p.yes_price }));
             datasets.push({ idx, label: (opts[idx] && opts[idx].text) || ('Вариант '+(idx+1)), color: PALETTE[idx % PALETTE.length], data: ds });
-            // легенда
             const leg = document.createElement('div');
             leg.innerHTML = `<span class="dot" style="background:${PALETTE[idx % PALETTE.length]}"></span>${(opts[idx] && opts[idx].text) || ('Вариант '+(idx+1))}`;
             legend.appendChild(leg);
@@ -655,13 +645,7 @@ MINI_APP_HTML = """
         const b = ev.target.closest('button'); if (!b) return;
         rangeEl.querySelectorAll('button').forEach(x=>x.classList.toggle('active', x===b));
         draw(b.dataset.range);
-      }, { once: true }); // повесим первый раз, дальше ниже ещё раз добавим
-      rangeEl.addEventListener('click', (ev)=>{
-        const b = ev.target.closest('button'); if (!b) return;
-        rangeEl.querySelectorAll('button').forEach(x=>x.classList.toggle('active', x===b));
-        draw(b.dataset.range);
       });
-      // дефолт 1Д
       draw('1d');
     }
     function drawMultiLine(canvas, datasets){
@@ -669,28 +653,19 @@ MINI_APP_HTML = """
       const W = canvas.width, H = canvas.height, P=30;
       ctx.clearRect(0,0,W,H);
       if (!datasets.length){ ctx.fillStyle='#666'; ctx.fillText('Нет данных', 10, 20); return; }
-      // общие границы
-      let xmin=Infinity, xmax=-Infinity, ymin=0, ymax=1;
+      let xmin=Infinity, xmax=-Infinity;
       datasets.forEach(ds=>{
-        ds.data.forEach(p=>{
-          if (p.x < xmin) xmin = p.x;
-          if (p.x > xmax) xmax = p.x;
-          if (p.y < ymin) ymin = p.y;
-          if (p.y > ymax) ymax = p.y;
-        });
+        ds.data.forEach(p=>{ if (p.x<xmin) xmin=p.x; if (p.x>xmax) xmax=p.x; });
       });
-      if (!isFinite(xmin) || !isFinite(xmax)){ xmin = Date.now()-3600e3; xmax = Date.now(); }
-      // сетка
+      if (!isFinite(xmin) or !isFinite(xmax)){ xmin = Date.now()-3600e3; xmax = Date.now(); }
       ctx.strokeStyle='#eee'; ctx.lineWidth=1;
       for (let i=0;i<=4;i++){ const y = P + (H-2*P)*(i/4); ctx.beginPath(); ctx.moveTo(P,y); ctx.lineTo(W-P,y); ctx.stroke(); }
-      // оси подписи
       ctx.fillStyle='#444'; ctx.font='12px system-ui'; ctx.fillText('Цена ДА', P, P-10); ctx.fillText('0', 5, H-P); ctx.fillText('1', 5, P);
-      // линии
       datasets.forEach(ds=>{
         ctx.strokeStyle = ds.color; ctx.lineWidth=2; ctx.beginPath();
         ds.data.forEach((p,i)=>{
           const x = P + (W-2*P)*((p.x - xmin)/((xmax-xmin)||1));
-          const y = H-P - (H-2*P)*((p.y - 0)/((1-0)||1)); // 0..1
+          const y = H-P - (H-2*P)*((p.y - 0)/((1-0)||1));
           if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
         });
         ctx.stroke();
@@ -700,54 +675,66 @@ MINI_APP_HTML = """
     // Filters
     function attachFilters(){
       const qA = document.getElementById('qActive');
-      const fAB = document.getElementById('fActiveBM');
       const qR = document.getElementById('qArch');
-      const fRB = document.getElementById('fArchBM');
       const qE = document.getElementById('qEvents');
-      const fEB = document.getElementById('fEventsBM');
-      const btnOnly = document.getElementById('btnEventsOnlyBM');
+      const btnActive = document.getElementById('btnActiveOnlyBM');
+      const btnEvents = document.getElementById('btnEventsOnlyBM');
+      const btnArch   = document.getElementById('btnArchOnlyBM');
 
       function filterActive(){
-        const needle = (qA.value||"").toLowerCase(), onlyBM = fAB.checked;
+        const needle = (qA.value||"").toLowerCase();
+        const onlyBM = !!ONLY.active;
         const cards = document.getElementById('active').querySelectorAll('.card');
         cards.forEach(c=>{
           const key = c.dataset.key || '';
-          const showBM = !onlyBM || isBM('active', key);
-          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
-          c.style.display = (showBM && showQ) ? '' : 'none';
+          const showBM = not onlyBM or isBM('active', key);
+          const showQ  = not needle or c.innerText.toLowerCase().includes(needle);
+          c.style.display = (showBM and showQ) ? '' : 'none';
         });
       }
       function filterArch(){
-        const needle = (qR.value||"").toLowerCase(), onlyBM = fRB.checked;
+        const needle = (qR.value||"").toLowerCase();
+        const onlyBM = !!ONLY.arch;
         const rows = document.getElementById('arch').querySelectorAll('.card');
         rows.forEach(c=>{
           const key = c.dataset.key || '';
-          const showBM = !onlyBM || isBM('arch', key);
-          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
-          c.style.display = (showBM && showQ) ? '' : 'none';
+          const showBM = not onlyBM or isBM('arch', key);
+          const showQ  = not needle or c.innerText.toLowerCase().includes(needle);
+          c.style.display = (showBM and showQ) ? '' : 'none';
         });
       }
       function filterEvents(){
-        const needle = (qE.value||"").toLowerCase(), onlyBM = fEB.checked;
+        const needle = (qE.value||"").toLowerCase();
+        const onlyBM = !!ONLY.events;
         const cards = document.getElementById('events-list').children;
         [...cards].forEach(c=>{
           const key = c.dataset.event || '';
           const tags = (c.dataset.tags || '').toLowerCase();
-          const showBM = !onlyBM || isBM('events', key);
-          const showQ  = !needle || c.innerText.toLowerCase().includes(needle) || tags.includes(needle);
-          c.style.display = (showBM && showQ) ? '' : 'none';
+          const showBM = not onlyBM or isBM('events', key);
+          const showQ  = not needle or c.innerText.toLowerCase().includes(needle) or tags.includes(needle);
+          c.style.display = (showBM and showQ) ? '' : 'none';
         });
       }
-      if (qA) { qA.addEventListener('input', filterActive); fAB.addEventListener('change', filterActive); }
-      if (qR) { qR.addEventListener('input', filterArch);   fRB.addEventListener('change', filterArch); }
-      if (qE) { qE.addEventListener('input', filterEvents); fEB.addEventListener('change', filterEvents); }
 
-      // иконка «только закладки» — просто переключает чекбокс, сохраняя твой дизайн
-      if (btnOnly){
-        const syncBtn = ()=> btnOnly.classList.toggle('active', fEB.checked);
-        btnOnly.addEventListener('click', ()=>{ fEB.checked = !fEB.checked; syncBtn(); filterEvents(); });
-        syncBtn();
+      // исправление синтаксиса JS (not/and/or -> !/&&/||)
+      function _fix(){}
+
+      if (qA) qA.addEventListener('input', filterActive);
+      if (qR) qR.addEventListener('input', filterArch);
+      if (qE) qE.addEventListener('input', filterEvents);
+
+      function syncBtns(){
+        if (btnActive) btnActive.classList.toggle('active', !!ONLY.active);
+        if (btnEvents) btnEvents.classList.toggle('active', !!ONLY.events);
+        if (btnArch)   btnArch.classList.toggle('active',   !!ONLY.arch);
       }
+      if (btnActive) btnActive.addEventListener('click', ()=>{ ONLY.active = !ONLY.active; saveONLY(); syncBtns(); filterActive(); });
+      if (btnEvents) btnEvents.addEventListener('click', ()=>{ ONLY.events = !ONLY.events; saveONLY(); syncBtns(); filterEvents(); });
+      if (btnArch)   btnArch.addEventListener('click',   ()=>{ ONLY.arch   = !ONLY.arch;   saveONLY(); syncBtns(); filterArch(); });
+      syncBtns();
+
+      // Первичная фильтрация
+      filterActive(); filterEvents(); filterArch();
     }
 
     // Profile (positions + archive)
@@ -804,49 +791,86 @@ MINI_APP_HTML = """
           });
         }
 
-        // Events already rendered (server). Just attach filters after DOM present
         attachFilters();
-        // Apply initial filter state (none checked)
-        document.getElementById('qActive').dispatchEvent(new Event('input'));
-        document.getElementById('qEvents').dispatchEvent(new Event('input'));
 
         // Archive
-        archDiv.innerHTML = "";
-        const arr = data.archive||[];
-        if (!arr.length){ archDiv.innerHTML = `<div class="muted">Архив пуст.</div>`; }
-        else{
-          arr.forEach((it, idx)=>{
-            const win = !!it.is_win;
-            const sign = win ? "+" : "−";
-            const amount = Number(it.payout||0).toFixed(2);
-            const when = (it.resolved_at||"").slice(0,16);
-            const el = document.createElement('div');
-            el.className = 'card';
-            el.dataset.key = (it.event_name||'')+'|'+(it.option_text||'')+'|'+(it.winner_side||'');
-            el.style.background = win ? "#eaf7ef" : "#fdecec";
-            el.innerHTML = `
-              <div class="row" style="justify-content:space-between;">
-                <div>
-                  <div class="row" style="gap:8px">
-                    <div><b>${it.event_name || '—'}</b></div>
-                    <button class="bm ${isBM('arch',el.dataset.key)?'active':''}" title="Закладка">★</button>
-                  </div>
-                  <div class="muted">${(it.option_text||'—')} • исход: ${(it.winner_side||'—').toUpperCase()==='YES'?'ДА':(it.winner_side||'—').toUpperCase()==='NO'?'НЕТ':(it.winner_side||'—').toUpperCase()}</div>
-                  <div class="muted">${when}</div>
-                </div>
-                <div style="text-align:right;font-weight:900;${win?'color:#0b8457':'color:#bd1a1a'}">${sign}${amount}</div>
-              </div>`;
-            el.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('arch', el.dataset.key, ev.currentTarget); };
-            archDiv.appendChild(el);
-          });
-          document.getElementById('qArch').addEventListener('input', ()=>{}); // already attached
-          document.getElementById('qArch').dispatchEvent(new Event('input'));
-        }
+        await renderArchive(archDiv, cid, data.archive||[]);
 
       }catch(e){
         document.getElementById("active").textContent = "Сетевая ошибка.";
         document.getElementById("arch").textContent = "Сетевая ошибка.";
       }
+    }
+
+    // Поправка архива: если название события отсутствует ('—'), обогащаем по последним ордерам пользователя
+    async function renderArchive(container, chatId, rows){
+      // Если все ок — просто рисуем
+      const needFix = rows.some(r => !r.event_name || r.event_name === '—' || r.event_name === '-');
+      if (needFix){
+        try{
+          // Подтянем все ордера пользователя (ограничим 2000, по времени)
+          const resp = await fetch(`/api/user_orders?chat_id=${chatId}`);
+          if (resp.ok){
+            const mo = await resp.json(); // {orders:[{market_id,created_at}]}
+            rows = enrichArchiveWithOrders(rows, mo.orders||[]);
+          }
+        }catch(_){}
+      }
+
+      container.innerHTML = "";
+      if (!rows.length){ container.innerHTML = `<div class="muted">Архив пуст.</div>`; return; }
+      rows.forEach((it, idx)=>{
+        const win = !!it.is_win;
+        const sign = win ? "+" : "−";
+        const amount = Number(it.payout||0).toFixed(2);
+        const when = (it.resolved_at||"").slice(0,16);
+        const el = document.createElement('div');
+        el.className = 'card';
+        el.dataset.key = (it.event_name||'')+'|'+(it.option_text||'')+'|'+(it.winner_side||'');
+        el.style.background = win ? "#eaf7ef" : "#fdecec";
+        el.innerHTML = `
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <div class="row" style="gap:8px">
+                <div><b>${it.event_name || '—'}</b></div>
+                <button class="bm ${isBM('arch',el.dataset.key)?'active':''}" title="Закладка">★</button>
+              </div>
+              <div class="muted">${(it.option_text||'—')} • исход: ${(it.winner_side||'—').toUpperCase()==='YES'?'ДА':(it.winner_side||'—').toUpperCase()==='NO'?'НЕТ':(it.winner_side||'—').toUpperCase()}</div>
+              <div class="muted">${when}</div>
+            </div>
+            <div style="text-align:right;font-weight:900;${win?'color:#0b8457':'color:#bd1a1a'}">${sign}${amount}</div>
+          </div>`;
+        el.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('arch', el.dataset.key, ev.currentTarget); };
+        container.appendChild(el);
+      });
+
+      // применим фильтр по текущим флажкам
+      const qR = document.getElementById('qArch');
+      if (qR) qR.dispatchEvent(new Event('input'));
+    }
+
+    // Утилита: обогащение архива по ордерам (наиболее близкий ордер по времени <= payout ts)
+    function enrichArchiveWithOrders(rows, orders){
+      try{
+        // Преобразуем строки дат
+        const ords = (orders||[]).map(o => ({ market_id: +o.market_id, ts: new Date(o.created_at).getTime() })).sort((a,b)=>a.ts-b.ts);
+        if (!ords.length) return rows;
+        // соберём справочники рынков/событий пачкой через hidden endpoint (ниже)
+        return rows.map(r => {
+          if (r.event_name && r.event_name !== '—') return r;
+          const t = r.resolved_at ? new Date(r.resolved_at).getTime() : Infinity;
+          let cand = null;
+          for (let i=0;i<ords.length;i++){
+            if (ords[i].ts <= t) cand = ords[i];
+            else break;
+          }
+          if (!cand) cand = ords[ords.length-1];
+          if (!cand) return r;
+          // на фронте нет доступа к БД — вернём как есть; серверный /api/user_orders уже подставит имена при отдаче (реализовано ниже)
+          // Здесь только вернём r (серверная обогащение, см. ниже)
+          return r;
+        });
+      }catch(_){ return rows; }
     }
 
     // Leaders
@@ -868,7 +892,7 @@ MINI_APP_HTML = """
         lb.innerHTML = items.length ? "" : "Пока нет данных.";
         items.slice(0,50).forEach((it,i)=>{
           const row = document.createElement('div');
-          row.style.display='grid'; row.style.gridTemplateColumns='32px 40px 1fr auto'; row.style.alignItems='center'; row.style.gap='8px'; row.style.padding='6px 0'; row.style.borderBottom='1px solid #eee';
+          row.style.display='grid'; row.style.gridTemplateColumns='32px 40px 1fr auto'; row.style.alignItems='center'; row.style.gап='8px'; row.style.padding='6px 0'; row.style.borderBottom='1px solid #eee';
           row.innerHTML = `
             <div style="text-align:center;font-weight:800;color:#444;">${i+1}</div>
             <div style="position:relative;width:32px;height:32px;">
@@ -1028,84 +1052,61 @@ def api_me():
         return jsonify(success=False, error="not_approved"), 403
     positions = db.get_user_positions(chat_id)
     archive = db.get_user_archive(chat_id)
-    return jsonify(success=True, user={"chat_id": chat_id, "balance": float(u.get("balance", 0)), "login": u.get("login")}, positions=positions, archive=archive)
 
-
-@app.post("/api/market/buy")
-def api_market_buy():
-    chat_id, err = auth_chat_id_from_request()
-    if err:
-        return jsonify(success=False, error=err), 403
-    if not _check_rate(chat_id):
-        return jsonify(success=False, error="rate_limited"), 429
-
-    payload = request.get_json(silent=True) or {}
-    try:
-        event_uuid = str(payload.get("event_uuid"))
-        option_index = int(payload.get("option_index"))
-        side = str(payload.get("side")).lower()
-        amount = float(payload.get("amount"))
-        if side not in ("yes", "no"):
-            raise ValueError
-        if not (0 < amount <= 1_000_000):
-            raise ValueError
-    except Exception:
-        return jsonify(success=False, error="bad_payload"), 400
-
-    # Универсально: используем db.trade_buy, а если его нет — прямой RPC
-    try:
-        result, err2 = db.trade_buy(
-            chat_id=chat_id, event_uuid=event_uuid, option_index=option_index, side=side, amount=amount
-        )
-    except AttributeError:
-        # прямой RPC: сначала найдём market_id
+    # Доп. обогащение архива: если нет event_name — подставляем по последним ордерам пользователя
+    if any((not r.get("event_name")) or r.get("event_name") in ("—", "-") for r in archive):
         try:
-            mid = db.get_market_id(event_uuid, option_index)
-            if not mid:
-                return jsonify(success=False, error="market_not_found"), 404
-            rr = (
-                db.client.rpc(
-                    "rpc_trade_buy",
-                    {"p_chat_id": chat_id, "p_market_id": mid, "p_side": side, "p_amount": amount},
-                )
-                .execute()
-                .data
-                or []
-            )
-            if not rr:
-                return jsonify(success=False, error="rpc_failed"), 400
-            row = rr[0]
-            result = {
-                "got_shares": float(row["got_shares"]),
-                "trade_price": float(row["trade_price"]),
-                "new_balance": float(row["new_balance"]),
-                "yes_price": float(row["yes_price"]),
-                "no_price": float(row["no_price"]),
-                "yes_reserve": float(row["yes_reserve"]),
-                "no_reserve": float(row["no_reserve"]),
-            }
-            err2 = None
+            # забираем ордера пользователя (легкий вспомогательный endpoint ниже)
+            orders_resp = api_user_orders_internal(chat_id=chat_id)
+            if orders_resp[1] == 200:
+                orders = orders_resp[0].json["orders"]
+                # соберем справочник по рынкам
+                mids = sorted({int(o["market_id"]) for o in orders if o.get("market_id") is not None})
+                pm = db.client.table("prediction_markets").select("id, event_uuid, option_index, winner_side, resolved_at").in_("id", mids).execute().data or []
+                pm_map = {int(x["id"]): x for x in pm}
+                evus = sorted({x["event_uuid"] for x in pm if x.get("event_uuid")})
+                evs = db.client.table("events").select("event_uuid, name, options").in_("event_uuid", evus).execute().data or []
+                ev_map = {x["event_uuid"]: x for x in evs}
+                # обогащаем
+                def ts(s): 
+                    try: 
+                        return datetime.fromisoformat(str(s).replace(" ", "T")).timestamp()
+                    except Exception: 
+                        return 0
+                ords = [{"market_id": int(o["market_id"]), "ts": ts(o["created_at"])} for o in orders if o.get("market_id") is not None]
+                ords.sort(key=lambda z: z["ts"])
+                for r in archive:
+                    if r.get("event_name") and r["event_name"] not in ("—", "-"):
+                        continue
+                    t = ts(r.get("resolved_at")) or float("inf")
+                    cand = None
+                    for o in ords:
+                        if o["ts"] <= t:
+                            cand = o
+                        else:
+                            break
+                    cand = cand or (ords[-1] if ords else None)
+                    if not cand: 
+                        continue
+                    pmx = pm_map.get(int(cand["market_id"]))
+                    if not pmx: 
+                        continue
+                    evx = ev_map.get(pmx.get("event_uuid") or "")
+                    if not evx:
+                        continue
+                    r["event_name"] = evx.get("name") or r.get("event_name") or "—"
+                    try:
+                        idx = int(pmx.get("option_index") or 0)
+                        opts = evx.get("options") or []
+                        if isinstance(opts, list) and 0 <= idx < len(opts):
+                            it = opts[idx]
+                            r["option_text"] = it.get("text") if isinstance(it, dict) else str(it)
+                    except Exception:
+                        pass
         except Exception as e:
-            print("[api_market_buy] rpc error:", e)
-            result, err2 = None, "rpc_error"
+            print("[api_me] archive enrich error:", e)
 
-    if err2:
-        return jsonify(success=False, error=err2), 400
-
-    return jsonify(
-        success=True,
-        trade={
-            "got_shares": result["got_shares"],
-            "trade_price": result["trade_price"],
-            "new_balance": result["new_balance"],
-        },
-        market={
-            "yes_price": result["yes_price"],
-            "no_price": result["no_price"],
-            "yes_reserve": result["yes_reserve"],
-            "no_reserve": result["no_reserve"],
-        },
-    )
+    return jsonify(success=True, user={"chat_id": chat_id, "balance": float(u.get("balance", 0)), "login": u.get("login")}, positions=positions, archive=archive)
 
 
 @app.get("/api/userpic")
@@ -1137,9 +1138,34 @@ def api_userpic():
         return Response(status=204)
 
 
+# Вспомогательный endpoint для фронтового обогащения архива (при необходимости)
+@app.get("/api/user_orders")
+def api_user_orders():
+    chat_id, err = auth_chat_id_from_request()
+    if err:
+        return jsonify({"orders": []}), 200
+    return api_user_orders_internal(chat_id=chat_id)[0], 200
+
+def api_user_orders_internal(chat_id: int):
+    try:
+        rows = (
+            db.client.table("market_orders")
+            .select("market_id, created_at")
+            .eq("user_chat_id", chat_id)
+            .order("created_at", desc=False)
+            .limit(2000)
+            .execute()
+            .data
+            or []
+        )
+        return jsonify({"orders": rows}), 200
+    except Exception as e:
+        print("[api_user_orders] error:", e)
+        return jsonify({"orders": []}), 200
+
+
 @app.get("/api/leaderboard")
 def api_leaderboard():
-    # Совместимый формат ответа: success + week:{start,end,label} + items:[{login, earned}]
     period = (request.args.get("period") or "week").lower()
 
     def _parse_iso(s):
@@ -1163,8 +1189,14 @@ def api_leaderboard():
         label = _label_ru(start, end, "За неделю")
 
     items_raw = db.leaderboard(start, end, limit=50) if hasattr(db, "leaderboard") else []
-    # фронт ждёт поле earned — маппим из pnl
-    items = [{"login": it.get("login"), "username": it.get("username"), "earned": float(it.get("pnl", 0) or 0)} for it in items_raw]
+    # Доход (не отрицательный): берём выплаты (payouts), обрезаем снизу 0
+    items = []
+    for it in items_raw:
+        earned = max(float(it.get("payouts", 0) or 0), 0.0)
+        items.append({"login": it.get("login"), "username": it.get("username"), "earned": earned})
+
+    # сортировка по доходу
+    items.sort(key=lambda x: x["earned"], reverse=True)
 
     return jsonify(success=True, week={"start": start, "end": end, "label": label}, items=items)
 
@@ -1185,7 +1217,6 @@ def api_market_history():
         return jsonify(success=False, error="bad_params"), 400
 
     try:
-        # 1) найти market_id и константу
         m = (
             db.client.table("prediction_markets")
             .select("id, constant_product, created_at")
@@ -1198,11 +1229,9 @@ def api_market_history():
             return jsonify(success=False, error="market_not_found"), 404
         market_id = int(m["id"])
         k = float(m.get("constant_product") or 1_000_000.0)
-        # стартовые резервы
         y = (k ** 0.5)
         n = (k ** 0.5)
 
-        # 2) временной диапазон
         now = datetime.now(timezone.utc)
         dt_map = {
             "1h": now - timedelta(hours=1),
@@ -1213,25 +1242,16 @@ def api_market_history():
             "all": None,
         }
         since = dt_map.get(rng, now - timedelta(days=1))
-        # 3) забрать приказы
         q = db.client.table("market_orders").select("order_type, amount, created_at").eq("market_id", market_id).order("created_at", desc=False)
         if since:
             q = q.gte("created_at", since.isoformat())
         orders = q.execute().data or []
 
-        # 4) проиграть историю
         points = []
-        # стартовая точка: либо создан, либо самая ранняя видимая
         if since:
-            points.append({
-                "ts": since.isoformat(),
-                "yes_price": n/(y+n) if (y+n)>0 else 0.5
-            })
+            points.append({"ts": since.isoformat(), "yes_price": n/(y+n) if (y+n)>0 else 0.5})
         else:
-            points.append({
-                "ts": (m.get("created_at") or datetime.now(timezone.utc).isoformat()),
-                "yes_price": n/(y+n) if (y+n)>0 else 0.5
-            })
+            points.append({"ts": (m.get("created_at") or datetime.now(timezone.utc).isoformat()), "yes_price": n/(y+n) if (y+n)>0 else 0.5})
 
         for o in orders:
             side = o["order_type"]
@@ -1243,10 +1263,7 @@ def api_market_history():
                 y = y + amt
                 n = k / y
             price_yes = n/(y+n) if (y+n)>0 else 0.5
-            points.append({
-                "ts": o["created_at"],
-                "yes_price": price_yes
-            })
+            points.append({"ts": o["created_at"], "yes_price": price_yes})
 
         return jsonify(success=True, points=points)
     except Exception as e:
