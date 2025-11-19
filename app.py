@@ -275,7 +275,7 @@ def telegram_webhook():
     return "ok"
 
 
-# ---------- Mini App HTML (оставлен твой исходный дизайн) ----------
+# ---------- Mini App HTML (твоя вёрстка сохранена) ----------
 MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
@@ -510,11 +510,11 @@ MINI_APP_HTML = """
       if (tgUser){
         if (tgUser.first_name) initials += tgUser.first_name[0];
         if (tgUser.last_name)  initials += tgUser.last_name[0];
-        if (!initials and tgUser.username) initials = tgUser.username.slice(0,2);
+        if (!initials && tgUser.username) initials = tgUser.username.slice(0,2);
       } else if (login) { initials = String(login).slice(0,2); }
       ph.textContent = (initials || "U").toUpperCase();
 
-      if (tgUser and tgUser.photo_url) { if (tryImg(tgUser.photo_url)) return; }
+      if (tgUser && tgUser.photo_url) { if (tryImg(tgUser.photo_url)) return; }
       const cid = getChatId();
       if (cid){
         let url = `/api/userpic?chat_id=${cid}`;
@@ -718,10 +718,6 @@ MINI_APP_HTML = """
       if (qA) { qA.addEventListener('input', filterActive); fAB.addEventListener('change', filterActive); }
       if (qR) { qR.addEventListener('input', filterArch);   fRB.addEventListener('change', filterArch); }
       if (qE) { qE.addEventListener('input', filterEvents); fEB.addEventListener('change', filterEvents); }
-
-      // initial apply
-      if (qActive) qActive.dispatchEvent(new Event('input'));
-      if (qEvents) qEvents.dispatchEvent(new Event('input'));
     }
 
     // Profile (positions + archive)
@@ -812,10 +808,9 @@ MINI_APP_HTML = """
           if (document.getElementById('qArch')) document.getElementById('qArch').dispatchEvent(new Event('input'));
         }
 
-      }catch(e){
-        document.getElementById("active").textContent = "Сетевая ошибка.";
-        document.getElementById("arch").textContent = "Сетевая ошибка.";
-      }
+      }catch(e):
+        document.getElementById("active").textContent = "Сетевая ошибка."
+        document.getElementById("arch").textContent = "Сетевая ошибка."
     }
 
     // Leaders
@@ -889,7 +884,442 @@ MINI_APP_HTML = """
 """
 
 
-# ---------- Rate limiting ----------
+# ---------- Admin: мероприятия (список + график + резолв) ----------
+ADMIN_EVENTS_HTML = """
+<!doctype html><meta charset="utf-8">
+<title>Admin · Мероприятия</title>
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;line-height:1.4;color:#222}
+ h1{margin:0 0 12px} h2{margin:18px 0 8px}
+ .muted{color:#667085}
+ .row{display:flex;align-items:center;gap:8px}
+ input[type=text]{padding:8px;border:1px solid #e5e7eb;border-radius:8px;flex:1}
+ .btn{border:0;border-radius:8px;padding:6px 10px;cursor:pointer}
+ .sec{background:#eef3ff;color:#0b285a}
+ .ok{background:#e7f6ec;color:#116330}
+ .no{background:#fdecec;color:#7a0b0b}
+ .card{border:1px solid #eee;border-radius:12px;padding:12px;margin:8px 0}
+ table{width:100%;border-collapse:collapse}
+ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
+ tr:hover td{background:#fafafa}
+ .ev-row{cursor:pointer}
+ .ev-details{display:none;padding:8px 0 0 0}
+ .legend{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 0;font-size:12px;color:#444}
+ .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
+ .range{display:flex;gap:6px;margin:6px 0;background:#f0f2f5;padding:4px;border-radius:999px}
+ .range button{border:0;border-radius:999px;padding:6px 10px;background:transparent;cursor:pointer;font-size:12px;color:#444}
+ .range button.active{background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.08);color:#111}
+ .resolve{margin-top:8px;border-top:1px dashed #eee;padding-top:8px}
+ .optline{display:flex;align-items:center;gap:12px;margin:6px 0}
+ .badge{display:inline-block;border-radius:999px;padding:2px 8px;background:#eef3ff;color:#0b285a;border:1px solid #d9e3ff}
+</style>
+
+<a href="/admin" class="muted">← Админ</a>
+<h1>Мероприятия</h1>
+
+<div class="card">
+  <form method="get" action="/admin/events" class="row">
+    <input type="text" name="q" value="{{q or ''}}" placeholder="Поиск по названию/тегам/UUID">
+    <button class="btn sec" type="submit">Искать</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Активные</h2>
+  <table>
+    <thead><tr><th>UUID</th><th>Название</th><th>Дедлайн</th><th>Опубл.</th><th>Рынков</th></tr></thead>
+    <tbody>
+    {% for ev in active %}
+      <tr class="ev-row" data-uuid="{{ev.event_uuid}}">
+        <td>{{ev.event_uuid}}</td><td>{{ev.name}}</td><td>{{ev.end_date}}</td><td>{{'да' if ev.is_published else 'нет'}}</td><td>{{ev.markets_count}}</td>
+      </tr>
+      <tr><td colspan="5">
+        <div id="d-{{ev.event_uuid}}" class="ev-details">
+          <div class="muted">{{ev.description}}</div>
+          <div class="resolve" id="res-{{ev.event_uuid}}"><span class="badge">Закрыть событие</span><div>Загрузка вариантов…</div></div>
+          <div class="range" id="rng-{{ev.event_uuid}}">
+            {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
+              <button class="{{ 'active' if r=='1d' else '' }}" data-range="{{r}}">{{t}}</button>
+            {% endfor %}
+          </div>
+          <canvas id="c-{{ev.event_uuid}}" width="800" height="180" style="width:100%;max-width:100%"></canvas>
+          <div class="legend" id="lg-{{ev.event_uuid}}"></div>
+        </div>
+      </td></tr>
+    {% endfor %}
+    {% if not active %}<tr><td colspan="5" class="muted">Нет активных</td></tr>{% endif %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Прошедшие</h2>
+  <table>
+    <thead><tr><th>UUID</th><th>Название</th><th>Дедлайн</th><th>Опубл.</th><th>Рынков</th></tr></thead>
+    <tbody>
+    {% for ev in past %}
+      <tr class="ev-row" data-uuid="{{ev.event_uuid}}">
+        <td>{{ev.event_uuid}}</td><td>{{ev.name}}</td><td>{{ev.end_date}}</td><td>{{'да' if ev.is_published else 'нет'}}</td><td>{{ev.markets_count}}</td>
+      </tr>
+      <tr><td colspan="5">
+        <div id="d-{{ev.event_uuid}}" class="ev-details">
+          <div class="muted">{{ev.description}}</div>
+          <div class="resolve" id="res-{{ev.event_uuid}}"><span class="badge">Закрыть событие</span><div>Загрузка вариантов…</div></div>
+          <div class="range" id="rng-{{ev.event_uuid}}">
+            {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
+              <button class="{{ 'active' if r=='1d' else '' }}" data-range="{{r}}">{{t}}</button>
+            {% endfor %}
+          </div>
+          <canvas id="c-{{ev.event_uuid}}" width="800" height="180" style="width:100%;max-width:100%"></canvas>
+          <div class="legend" id="lg-{{ev.event_uuid}}"></div>
+        </div>
+      </td></tr>
+    {% endfor %}
+    {% if not past %}<tr><td colspan="5" class="muted">Нет прошедших</td></tr>{% endif %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+  const PALETTE=['#1976d2','#2e7d32','#c62828','#8e24aa','#ef6c00','#00897b','#5d4037','#3949ab'];
+
+  function drawMultiLine(canvas, datasets){
+    const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height,P=30;
+    ctx.clearRect(0,0,W,H);
+    if(!datasets.length){ctx.fillStyle='#666';ctx.fillText('Нет данных',10,20);return;}
+    let xmin=Infinity,xmax=-Infinity;
+    datasets.forEach(ds=>ds.data.forEach(p=>{if(p.x<xmin)xmin=p.x;if(p.x>xmax)xmax=p.x;}));
+    if(!isFinite(xmin)||!isFinite(xmax)){xmin=Date.now()-3600e3;xmax=Date.now();}
+    ctx.strokeStyle='#eee';ctx.lineWidth=1;
+    for(let i=0;i<=4;i++){const y=P+(H-2*P)*(i/4);ctx.beginPath();ctx.moveTo(P,y);ctx.lineTo(W-P,y);ctx.stroke();}
+    ctx.fillStyle='#444';ctx.font='12px system-ui';ctx.fillText('Цена ДА',P,P-10);ctx.fillText('0',5,H-P);ctx.fillText('1',5,P);
+    datasets.forEach(ds=>{
+      ctx.strokeStyle=ds.color;ctx.lineWidth=2;ctx.beginPath();
+      ds.data.forEach((p,i)=>{const x=P+(W-2*P)*((p.x-xmin)/((xmax-xmin)||1));const y=H-P-(H-2*P)*((p.y-0)/((1-0)||1));if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});
+      ctx.stroke();
+    });
+  }
+
+  async function loadEventMarkets(evu){
+    const box=document.getElementById('res-'+evu);
+    box.innerHTML='<div>Загрузка…</div>';
+    const r=await fetch('/api/admin/event_markets?event_uuid='+encodeURIComponent(evu));
+    const data=await r.json();
+    const opts=data.options||[], markets=data.markets||[];
+    if(!markets.length){ box.innerHTML='<div class="muted">Рынков нет</div>'; return; }
+    const form=document.createElement('div');
+    markets.forEach(m=>{
+      const line=document.createElement('div'); line.className='optline';
+      const title=opts[m.option_index] || ('Вариант '+(m.option_index+1));
+      line.innerHTML = `
+        <div style="min-width:180px"><b>${title}</b></div>
+        <label><input type="radio" name="w_${m.option_index}" value="yes"> ДА</label>
+        <label><input type="radio" name="w_${m.option_index}" value="no"> НЕТ</label>
+        <span class="muted">${m.resolved ? 'закрыт ('+(m.winner_side||'—')+')' : ''}</span>`;
+      form.appendChild(line);
+    });
+    const btnSome=document.createElement('button'); btnSome.className='btn ok'; btnSome.textContent='Закрыть выбранные';
+    btnSome.onclick=()=>submitResolve(evu, markets, false);
+
+    const btnAll=document.createElement('button'); btnAll.className='btn no'; btnAll.style.marginLeft='8px'; btnAll.textContent='Закрыть всё событие';
+    btnAll.onclick=()=>submitResolve(evu, markets, true);
+
+    const hint=document.createElement('div'); hint.className='muted'; hint.style.marginTop='6px';
+    hint.textContent='Выберите победные исходы по вариантам и нажмите кнопку.';
+
+    box.innerHTML='';
+    box.appendChild(form); box.appendChild(btnSome); box.appendChild(btnAll); box.appendChild(hint);
+  }
+
+  async function submitResolve(evu, markets, requireAll){
+    const winners={};
+    let requiredCount = 0;
+    markets.forEach(m=>{
+      const r=document.querySelector(`input[name="w_${m.option_index}"]:checked`);
+      if (r){ winners[m.option_index]=r.value; requiredCount++; }
+    });
+    if (requireAll && requiredCount < markets.length){
+      alert('Для «Закрыть всё событие» нужно выбрать победную сторону для каждого варианта.');
+      return;
+    }
+    const resp=await fetch('/admin/events/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_uuid:evu,winners,require_all:requireAll})});
+    const out=await resp.json();
+    if(!resp.ok || !out.success){ alert('Ошибка: '+(out.error||resp.statusText)); return; }
+    alert('Готово. Закрыто рынков: '+out.closed+', Выплаты: '+out.payout_total);
+    location.reload();
+  }
+
+  async function loadEventChart(evu, rng){
+    const c=document.getElementById('c-'+evu), lg=document.getElementById('lg-'+evu);
+    if(!c||!lg)return;
+    lg.innerHTML='';
+    const r=await fetch('/api/admin/event_markets?event_uuid='+encodeURIComponent(evu));
+    const pm=await r.json();
+    const opts=pm.options||[], markets=pm.markets||[];
+    const datasets=[];
+    for(const m of markets){
+      const rr=await fetch(`/api/market/history?event_uuid=${encodeURIComponent(evu)}&option_index=${m.option_index}&range=${rng}`);
+      const data=await rr.json();
+      if(!data.success||!data.points) continue;
+      const ds=data.points.map(p=>({x:new Date(p.ts).getTime(),y:+p.yes_price}));
+      const color=PALETTE[m.option_index%PALETTE.length];
+      datasets.push({label:(opts[m.option_index]||('Вариант '+(m.option_index+1))), color, data:ds});
+      const d=document.createElement('div');d.innerHTML=`<span class="dot" style="background:${color}"></span>${opts[m.option_index]||('Вариант '+(m.option_index+1))}`;lg.appendChild(d);
+    }
+    drawMultiLine(c,datasets);
+  }
+
+  document.addEventListener('click',(e)=>{
+    const row=e.target.closest('.ev-row'); if(!row) return;
+    const evu=row.dataset.uuid;
+    const box=document.getElementById('d-'+evu);
+    const open=box.style.display==='block';
+    document.querySelectorAll('.ev-details').forEach(x=>x.style.display='none');
+    if(!open){
+      box.style.display='block';
+      loadEventMarkets(evu);
+      loadEventChart(evu,'1d');
+    }
+  });
+
+  document.querySelectorAll('.range').forEach(r=>{
+    r.addEventListener('click',(e)=>{
+      const b=e.target.closest('button'); if(!b) return;
+      r.querySelectorAll('button').forEach(x=>x.classList.toggle('active', x===b));
+      const evu=r.id.substring(4);
+      loadEventChart(evu,b.dataset.range);
+    });
+  });
+</script>
+"""
+
+# ---------- Admin: маршруты мероприятий ----------
+@app.get("/admin")
+@requires_auth
+def admin_home():
+    return render_template_string(
+        """<!doctype html><meta charset="utf-8"><title>Admin</title>
+           <style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:780px;margin:24px auto;padding:0 16px}
+           a{color:#0b285a;text-decoration:none} .card{border:1px solid #eee;border-radius:12px;padding:12px} .muted{color:#667085}</style>
+           <h1>Админ</h1>
+           <div class="card">
+             <p><a href="/admin/events">Мероприятия</a></p>
+             <p><a href="/admin/reset">Сброс данных (стенд)</a></p>
+           </div>"""
+    )
+
+@app.get("/admin/events")
+@requires_auth
+def admin_events():
+    q = (request.args.get("q") or "").strip().lower()
+    try:
+        evs = (
+            db.client.table("events")
+            .select("event_uuid,name,description,options,end_date,is_published,created_at,tags")
+            .order("created_at", desc=True)
+            .execute()
+            .data or []
+        )
+    except Exception as e:
+        print("[/admin/events] fetch error:", e)
+        evs = []
+    now = datetime.now(timezone.utc)
+    def match(e):
+        if not q: return True
+        return any([q in str(e.get("event_uuid","")).lower(),
+                    q in str(e.get("name","")).lower(),
+                    q in ",".join([str(t).lower() for t in (e.get("tags") or [])])])
+    filt = [e for e in evs if match(e)]
+    uuids = [e["event_uuid"] for e in filt]
+    pm_map = {}
+    if uuids:
+        try:
+            pms = (
+                db.client.table("prediction_markets")
+                .select("event_uuid,id")
+                .in_("event_uuid", uuids)
+                .execute()
+                .data or []
+            )
+            from collections import Counter
+            pm_map = dict(Counter([p["event_uuid"] for p in pms]))
+        except Exception:
+            pm_map = {}
+    def enrich(e):
+        e2 = dict(e)
+        e2["markets_count"] = pm_map.get(e["event_uuid"], 0)
+        return e2
+    active = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) > now]
+    past   = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) <= now]
+    return render_template_string(ADMIN_EVENTS_HTML, active=active, past=past, q=q)
+
+@app.get("/api/admin/event_markets")
+@requires_auth
+def api_admin_event_markets():
+    evu = (request.args.get("event_uuid") or "").strip()
+    if not evu:
+        return jsonify({"error": "no_event_uuid"}), 400
+    try:
+        ev = (
+            db.client.table("events")
+            .select("options")
+            .eq("event_uuid", evu)
+            .single()
+            .execute()
+            .data or {}
+        )
+        opts = []
+        for o in (ev.get("options") or []):
+            opts.append(o.get("text") if isinstance(o, dict) else str(o))
+        pms = (
+            db.client.table("prediction_markets")
+            .select("id, option_index, total_yes_reserve, total_no_reserve, resolved, winner_side")
+            .eq("event_uuid", evu)
+            .order("option_index", desc=False)
+            .execute()
+            .data or []
+        )
+        return jsonify({"options": opts, "markets": pms})
+    except Exception as e:
+        print("[/api/admin/event_markets] error:", e)
+        return jsonify({"options": [], "markets": []}), 200
+
+@app.post("/admin/events/resolve")
+@requires_auth
+def admin_events_resolve():
+    payload = request.get_json(silent=True) or {}
+    evu = (payload.get("event_uuid") or "").strip()
+    winners = payload.get("winners") or {}   # { "0":"yes", "1":"no", ... }
+    require_all = bool(payload.get("require_all"))
+    if not evu or not isinstance(winners, dict):
+        return jsonify(success=False, error="bad_payload"), 400
+    try:
+        ev = (
+            db.client.table("events")
+            .select("end_date")
+            .eq("event_uuid", evu)
+            .single()
+            .execute()
+            .data
+        )
+        if not ev:
+            return jsonify(success=False, error="event_not_found"), 404
+        end_dt = datetime.fromisoformat(str(ev["end_date"]).replace(" ","T"))
+        now = datetime.now(timezone.utc)
+
+        pms = (
+            db.client.table("prediction_markets")
+            .select("id, option_index, resolved")
+            .eq("event_uuid", evu)
+            .order("option_index", desc=False)
+            .execute()
+            .data
+            or []
+        )
+        unresolved = [m for m in pms if not m.get("resolved")]
+        if require_all:
+            need = {int(m["option_index"]) for m in unresolved}
+            got = {int(k) for k in winners.keys() if str(k).isdigit()}
+            if need != got:
+                return jsonify(success=False, error="winners_incomplete"), 400
+
+        closed = 0
+        payout_total = 0.0
+        for m in unresolved:
+            idx = int(m["option_index"])
+            w = (winners.get(str(idx)) or winners.get(idx) or "").lower()
+            if w not in ("yes","no"):
+                # допускаем частичный резолв, если require_all=False
+                if require_all:
+                    return jsonify(success=False, error=f"winner_missing_for_option_{idx}"), 400
+                continue
+            try:
+                if now < end_dt:
+                    rr = (
+                        db.client.rpc("rpc_resolve_market_force", {"p_market_id": int(m["id"]), "p_winner": w})
+                        .execute()
+                        .data
+                        or []
+                    )
+                else:
+                    rr = (
+                        db.client.rpc("rpc_resolve_market_by_id", {"p_market_id": int(m["id"]), "p_winner": w})
+                        .execute()
+                        .data
+                        or []
+                    )
+                if rr:
+                    closed += 1
+                    payout_total += float(rr[0].get("total_payout") or 0)
+            except Exception as e:
+                print("[resolve_one] error:", e)
+                continue
+
+        return jsonify(success=True, closed=closed, payout_total=round(payout_total,4))
+    except Exception as e:
+        print("[/admin/events/resolve] error:", e)
+        return jsonify(success=False, error="server_error"), 500
+
+
+# ---------- Admin: сброс данных (стенд) ----------
+ADMIN_RESET_HTML = """
+<!doctype html><meta charset="utf-8">
+<title>Admin · Сброс данных</title>
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:760px;margin:24px auto;padding:0 16px}
+ .muted{color:#667085} .btn{border:0;border-radius:8px;padding:6px 10px;cursor:pointer}
+ .no{background:#fdecec;color:#7a0b0b} .ok{background:#e7f6ec;color:#116330} .sec{background:#eef3ff;color:#0b285a}
+ fieldset{border:1px solid #eee;border-radius:12px;padding:12px;margin:0 0 12px}
+ input[type=text]{padding:8px;border:1px solid #e5e7eb;border-radius:8px;width:220px}
+</style>
+<a href="/admin" class="muted">← Админ</a>
+<h1>Сброс данных (стенд)</h1>
+<p class="muted">Удалит события/рынки/ордера/позиции/леджер и сбросит балансы к 1000. Введите «RESET» для подтверждения.</p>
+<form method="post" action="/admin/reset">
+  <fieldset>
+    <label><input type="checkbox" name="wipe_events" checked> Удалить события и рынки</label><br>
+    <label><input type="checkbox" name="wipe_trades" checked> Удалить ордера/позиции/леджер</label><br>
+    <label><input type="checkbox" name="reset_balances" checked> Сбросить балансы пользователей к 1000</label><br>
+  </fieldset>
+  <div class="row" style="display:flex;align-items:center;gap:8px">
+    <input type="text" name="confirm" placeholder="Введите RESET для подтверждения">
+    <button class="btn no" type="submit">Сбросить</button>
+  </div>
+</form>
+{% if msg %}<p class="muted">{{msg}}</p>{% endif %}
+"""
+
+@app.get("/admin/reset")
+@requires_auth
+def admin_reset_get():
+    return render_template_string(ADMIN_RESET_HTML, msg=request.args.get("msg",""))
+
+@app.post("/admin/reset")
+@requires_auth
+def admin_reset_post():
+    confirm = (request.form.get("confirm") or "").strip().upper()
+    if confirm != "RESET":
+        return redirect(url_for("admin_reset_get", msg="Нужно ввести RESET"))
+    wipe_events = bool(request.form.get("wipe_events"))
+    wipe_trades = bool(request.form.get("wipe_trades"))
+    reset_balances = bool(request.form.get("reset_balances"))
+    try:
+        if wipe_trades:
+            db.client.table("ledger").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+            db.client.table("market_orders").delete().gte("id", 0).execute()
+            db.client.table("user_shares").delete().gte("id", 0).execute()
+        if wipe_events:
+            db.client.table("prediction_markets").delete().gte("id", 0).execute()
+            db.client.table("events").delete().gte("id", 0).execute()
+        if reset_balances:
+            db.client.table("users").update({"balance": 1000.0}).neq("chat_id", None).execute()
+        return redirect(url_for("admin_reset_get", msg="Готово"))
+    except Exception as e:
+        print("[/admin/reset] error:", e)
+        return redirect(url_for("admin_reset_get", msg="Ошибка сброса"))
+
+
+# ---------- Mini‑app + API ----------
 RL_USER_WINDOW = 10
 RL_USER_LIMIT  = 5
 RL_IP_WINDOW   = 60
@@ -926,7 +1356,6 @@ def _check_rate(chat_id: int) -> bool:
     return True
 
 
-# ---------- Mini‑app + API ----------
 @app.get("/mini-app")
 def mini_app():
     chat_id = request.args.get("chat_id", type=int)
@@ -1117,21 +1546,24 @@ def api_leaderboard():
         start, end = db.week_current_bounds()
         label = _label_ru(start, end, "За неделю")
 
-    # НИЧЕГО не меняем в формате ответа (совместимо с твоим фронтом)
-    items_week = db.get_leaderboard_week(start, limit=50) if hasattr(db, "get_leaderboard_week") else []
-    items_month = db.get_leaderboard_month(start, limit=50) if hasattr(db, "get_leaderboard_month") else []
+    # Возвращаем формат как у тебя (success + week + items)
+    items = []
+    try:
+        # если у тебя есть готовые методы — используй их
+        if hasattr(db, "leaderboard"):
+            items_raw = db.leaderboard(start, end, limit=50)
+            # совместим с фронтом: login, earned
+            for it in items_raw:
+                items.append({"login": it.get("login"), "earned": max(float(it.get("payouts",0) or 0), 0.0)})
+    except Exception:
+        pass
 
-    items = items_week if period == "week" else items_month
     return jsonify(success=True, week={"start": start, "end": end, "label": label}, items=items)
 
 
-# ---------- Market history (для графиков в MiniApp) ----------
+# ---------- Market history (для графиков) ----------
 @app.get("/api/market/history")
 def api_market_history():
-    """
-    Точки истории цены ДА для конкретного рынка (event_uuid + option_index),
-    расчёт по market_orders с проигрыванием AMM (x*y=k) от стартовых резервов 1000/1000.
-    """
     event_uuid = request.args.get("event_uuid", type=str)
     option_index = request.args.get("option_index", type=int)
     rng = (request.args.get("range") or "1d").lower()
@@ -1201,355 +1633,5 @@ def api_market_history():
         return jsonify(success=False, error="server_error"), 500
 
 
-# ---------- Admin: страница мероприятий и резолв ----------
-ADMIN_EVENTS_HTML = """
-<!doctype html><meta charset="utf-8">
-<title>Admin · Мероприятия</title>
-<style>
- body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;line-height:1.4;color:#222}
- h1{margin:0 0 12px} h2{margin:18px 0 8px}
- .muted{color:#667085}
- .row{display:flex;align-items:center;gap:8px}
- input[type=text]{padding:8px;border:1px solid #e5e7eb;border-radius:8px;flex:1}
- .btn{border:0;border-radius:8px;padding:6px 10px;cursor:pointer}
- .sec{background:#eef3ff;color:#0b285a}
- .ok{background:#e7f6ec;color:#116330}
- .no{background:#fdecec;color:#7a0b0b}
- .card{border:1px solid #eee;border-radius:12px;padding:12px;margin:8px 0}
- table{width:100%;border-collapse:collapse}
- th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
- tr:hover td{background:#fafafa}
- .ev-row{cursor:pointer}
- .ev-details{display:none;padding:8px 0 0 0}
- .legend{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 0;font-size:12px;color:#444}
- .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
- .range{display:flex;gap:6px;margin:6px 0;background:#f0f2f5;padding:4px;border-radius:999px}
- .range button{border:0;border-radius:999px;padding:6px 10px;background:transparent;cursor:pointer;font-size:12px;color:#444}
- .range button.active{background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.08);color:#111}
- .resolve{margin-top:8px;border-top:1px dashed #eee;padding-top:8px}
- .optline{display:flex;align-items:center;gap:12px;margin:6px 0}
- .badge{display:inline-block;border-radius:999px;padding:2px 8px;background:#eef3ff;color:#0b285a;border:1px solid #d9e3ff}
-</style>
-
-<a href="/admin" class="muted">← Админ</a>
-<h1>Мероприятия</h1>
-
-<div class="card">
-  <form method="get" action="/admin/events" class="row">
-    <input type="text" name="q" value="{{q or ''}}" placeholder="Поиск по названию/тегам/UUID">
-    <button class="btn sec" type="submit">Искать</button>
-  </form>
-</div>
-
-<div class="card">
-  <h2>Активные</h2>
-  <table>
-    <thead><tr><th>UUID</th><th>Название</th><th>Дедлайн</th><th>Опубл.</th><th>Рынков</th></tr></thead>
-    <tbody>
-    {% for ev in active %}
-      <tr class="ev-row" data-uuid="{{ev.event_uuid}}">
-        <td>{{ev.event_uuid}}</td><td>{{ev.name}}</td><td>{{ev.end_date}}</td><td>{{'да' if ev.is_published else 'нет'}}</td><td>{{ev.markets_count}}</td>
-      </tr>
-      <tr><td colspan="5">
-        <div id="d-{{ev.event_uuid}}" class="ev-details">
-          <div class="muted">{{ev.description}}</div>
-          <div class="resolve" id="res-{{ev.event_uuid}}"><span class="badge">Закрыть событие</span><div>Загрузка вариантов…</div></div>
-          <div class="range" id="rng-{{ev.event_uuid}}">
-            {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
-              <button class="{{ 'active' if r=='1d' else '' }}" data-range="{{r}}">{{t}}</button>
-            {% endfor %}
-          </div>
-          <canvas id="c-{{ev.event_uuid}}" width="800" height="180" style="width:100%;max-width:100%"></canvas>
-          <div class="legend" id="lg-{{ev.event_uuid}}"></div>
-        </div>
-      </td></tr>
-    {% endfor %}
-    {% if not active %}<tr><td colspan="5" class="muted">Нет активных</td></tr>{% endif %}
-    </tbody>
-  </table>
-</div>
-
-<div class="card">
-  <h2>Прошедшие</h2>
-  <table>
-    <thead><tr><th>UUID</th><th>Название</th><th>Дедлайн</th><th>Опубл.</th><th>Рынков</th></tr></thead>
-    <tbody>
-    {% for ev in past %}
-      <tr class="ev-row" data-uuid="{{ev.event_uuid}}">
-        <td>{{ev.event_uuid}}</td><td>{{ev.name}}</td><td>{{ev.end_date}}</td><td>{{'да' if ev.is_published else 'нет'}}</td><td>{{ev.markets_count}}</td>
-      </tr>
-      <tr><td colspan="5">
-        <div id="d-{{ev.event_uuid}}" class="ev-details">
-          <div class="muted">{{ev.description}}</div>
-          <div class="resolve" id="res-{{ev.event_uuid}}"><span class="badge">Закрыть событие</span><div>Загрузка вариантов…</div></div>
-          <div class="range" id="rng-{{ev.event_uuid}}">
-            {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
-              <button class="{{ 'active' if r=='1d' else '' }}" data-range="{{r}}">{{t}}</button>
-            {% endfor %}
-          </div>
-          <canvas id="c-{{ev.event_uuid}}" width="800" height="180" style="width:100%;max-width:100%"></canvas>
-          <div class="legend" id="lg-{{ev.event_uuid}}"></div>
-        </div>
-      </td></tr>
-    {% endfor %}
-    {% if not past %}<tr><td colspan="5" class="muted">Нет прошедших</td></tr>{% endif %}
-    </tbody>
-  </table>
-</div>
-
-<script>
-  const PALETTE=['#1976d2','#2e7d32','#c62828','#8e24aa','#ef6c00','#00897b','#5d4037','#3949ab'];
-
-  function drawMultiLine(canvas, datasets){
-    const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height,P=30;
-    ctx.clearRect(0,0,W,H);
-    if(!datasets.length){ctx.fillStyle='#666';ctx.fillText('Нет данных',10,20);return;}
-    let xmin=Infinity,xmax=-Infinity;
-    datasets.forEach(ds=>ds.data.forEach(p=>{if(p.x<xmin)xmin=p.x;if(p.x>xmax)xmax=p.x;}));
-    if(!isFinite(xmin)||!isFinite(xmax)){xmin=Date.now()-3600e3;xmax=Date.now();}
-    ctx.strokeStyle='#eee';ctx.lineWidth=1;
-    for(let i=0;i<=4;i++){const y=P+(H-2*P)*(i/4);ctx.beginPath();ctx.moveTo(P,y);ctx.lineTo(W-P,y);ctx.stroke();}
-    ctx.fillStyle='#444';ctx.font='12px system-ui';ctx.fillText('Цена ДА',P,P-10);ctx.fillText('0',5,H-P);ctx.fillText('1',5,P);
-    datasets.forEach(ds=>{
-      ctx.strokeStyle=ds.color;ctx.lineWidth=2;ctx.beginPath();
-      ds.data.forEach((p,i)=>{const x=P+(W-2*P)*((p.x-xmin)/((xmax-xmin)||1));const y=H-P-(H-2*P)*((p.y-0)/((1-0)||1));if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});
-      ctx.stroke();
-    });
-  }
-
-  async function loadEventMarkets(evu){
-    const box=document.getElementById('res-'+evu);
-    box.innerHTML='<div>Загрузка…</div>';
-    const r=await fetch('/api/admin/event_markets?event_uuid='+encodeURIComponent(evu));
-    const data=await r.json();
-    const opts=data.options||[], markets=data.markets||[];
-    if(!markets.length){ box.innerHTML='<div class="muted">Рынков нет</div>'; return; }
-    const form=document.createElement('div');
-    markets.forEach(m=>{
-      const line=document.createElement('div'); line.className='optline';
-      const title=opts[m.option_index] || ('Вариант '+(m.option_index+1));
-      line.innerHTML = `
-        <div style="min-width:180px"><b>${title}</b></div>
-        <label><input type="radio" name="w_${m.option_index}" value="yes"> ДА</label>
-        <label><input type="radio" name="w_${m.option_index}" value="no"> НЕТ</label>
-        <span class="muted">${m.resolved ? 'закрыт ('+(m.winner_side||'—')+')' : ''}</span>`;
-      form.appendChild(line);
-    });
-    const btn=document.createElement('button'); btn.className='btn ok'; btn.textContent='Закрыть выбранные';
-    btn.onclick=async ()=>{
-      const winners={};
-      markets.forEach(m=>{
-        const r=document.querySelector(`input[name="w_${m.option_index}"]:checked`);
-        if(r) winners[m.option_index]=r.value;
-      });
-      if(Object.keys(winners).length===0){ alert('Выбери победную сторону хотя бы для одного варианта'); return; }
-      const resp=await fetch('/admin/events/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_uuid:evu,winners})});
-      const out=await resp.json();
-      if(!resp.ok || !out.success){ alert('Ошибка: '+(out.error||resp.statusText)); return; }
-      alert('Готово. Закрыто рынков: '+out.closed+', Выплаты: '+out.payout_total);
-      location.reload();
-    };
-    box.innerHTML='';
-    box.appendChild(form); box.appendChild(btn);
-  }
-
-  async function loadEventChart(evu, rng){
-    const c=document.getElementById('c-'+evu), lg=document.getElementById('lg-'+evu);
-    if(!c||!lg) return; lg.innerHTML='';
-    const r=await fetch('/api/admin/event_markets?event_uuid='+encodeURIComponent(evu));
-    const data=await r.json();
-    const opts=data.options||[], markets=data.markets||[];
-    const datasets=[];
-    for(const m of markets){
-      const rr=await fetch(`/api/market/history?event_uuid=${encodeURIComponent(evu)}&option_index=${m.option_index}&range=${rng}`);
-      const d=await rr.json();
-      if(!d.success||!d.points) continue;
-      const ds=d.points.map(p=>({x:new Date(p.ts).getTime(),y:+p.yes_price}));
-      const color=PALETTE[m.option_index%PALETTE.length];
-      datasets.push({label:(opts[m.option_index]||('Вариант '+(m.option_index+1))), color, data:ds});
-      const el=document.createElement('div'); el.innerHTML=`<span class="dot" style="background:${color}"></span>${opts[m.option_index]||('Вариант '+(m.option_index+1))}`;
-      lg.appendChild(el);
-    }
-    drawMultiLine(c,datasets);
-  }
-
-  document.addEventListener('click', (e)=>{
-    const row=e.target.closest('.ev-row'); if(!row) return;
-    const evu=row.dataset.uuid, box=document.getElementById('d-'+evu);
-    const open=box.style.display==='block';
-    document.querySelectorAll('.ev-details').forEach(x=>x.style.display='none');
-    if(!open){
-      box.style.display='block';
-      loadEventMarkets(evu);
-      loadEventChart(evu,'1d');
-    }
-  });
-
-  document.querySelectorAll('.range').forEach(r=>{
-    r.addEventListener('click',(e)=>{
-      const b=e.target.closest('button'); if(!b) return;
-      r.querySelectorAll('button').forEach(x=>x.classList.toggle('active', x===b));
-      const evu=r.id.substring(4);
-      loadEventChart(evu,b.dataset.range);
-    });
-  });
-</script>
-"""
-
-@app.get("/admin")
-@requires_auth
-def admin_home():
-    return render_template_string(
-        """<!doctype html><meta charset="utf-8"><title>Admin</title>
-           <style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:780px;margin:24px auto;padding:0 16px}
-           a{color:#0b285a;text-decoration:none} .card{border:1px solid #eee;border-radius:12px;padding:12px}</style>
-           <h1>Админ</h1>
-           <div class="card">
-             <p><a href="/admin/events">Мероприятия</a></p>
-           </div>"""
-    )
-
-@app.get("/admin/events")
-@requires_auth
-def admin_events():
-    q = (request.args.get("q") or "").strip().lower()
-    try:
-        evs = (
-            db.client.table("events")
-            .select("event_uuid,name,description,options,end_date,is_published,created_at,tags")
-            .order("created_at", desc=True)
-            .execute()
-            .data or []
-        )
-    except Exception as e:
-        print("[/admin/events] fetch error:", e)
-        evs = []
-    now = datetime.now(timezone.utc)
-    def match(e):
-        if not q: return True
-        return any([q in str(e.get("event_uuid","")).lower(),
-                    q in str(e.get("name","")).lower(),
-                    q in ",".join([str(t).lower() for t in (e.get("tags") or [])])])
-    filt = [e for e in evs if match(e)]
-    uuids = [e["event_uuid"] for e in filt]
-    pm_map = {}
-    if uuids:
-        try:
-            pms = (
-                db.client.table("prediction_markets")
-                .select("event_uuid,id")
-                .in_("event_uuid", uuids)
-                .execute()
-                .data or []
-            )
-            from collections import Counter
-            pm_map = dict(Counter([p["event_uuid"] for p in pms]))
-        except Exception:
-            pm_map = {}
-    def enrich(e):
-        e2 = dict(e)
-        e2["markets_count"] = pm_map.get(e["event_uuid"], 0)
-        return e2
-    active = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) > now]
-    past   = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) <= now]
-    return render_template_string(ADMIN_EVENTS_HTML, active=active, past=past, q=q)
-
-@app.get("/api/admin/event_markets")
-@requires_auth
-def api_admin_event_markets():
-    evu = (request.args.get("event_uuid") or "").strip()
-    if not evu:
-        return jsonify({"error": "no_event_uuid"}), 400
-    try:
-        ev = (
-            db.client.table("events")
-            .select("options")
-            .eq("event_uuid", evu)
-            .single()
-            .execute()
-            .data or {}
-        )
-        opts = []
-        for o in (ev.get("options") or []):
-            opts.append(o.get("text") if isinstance(o, dict) else str(o))
-        pms = (
-            db.client.table("prediction_markets")
-            .select("id, option_index, total_yes_reserve, total_no_reserve, resolved, winner_side")
-            .eq("event_uuid", evu)
-            .order("option_index", desc=False)
-            .execute()
-            .data or []
-        )
-        return jsonify({"options": opts, "markets": pms})
-    except Exception as e:
-        print("[/api/admin/event_markets] error:", e)
-        return jsonify({"options": [], "markets": []}), 200
-
-@app.post("/admin/events/resolve")
-@requires_auth
-def admin_events_resolve():
-    payload = request.get_json(silent=True) or {}
-    evu = (payload.get("event_uuid") or "").strip()
-    winners = payload.get("winners") or {}  # {option_index: 'yes'|'no'}
-    if not evu or not isinstance(winners, dict):
-        return jsonify(success=False, error="bad_payload"), 400
-    try:
-        ev = (
-            db.client.table("events")
-            .select("end_date")
-            .eq("event_uuid", evu)
-            .single()
-            .execute()
-            .data
-        )
-        if not ev:
-            return jsonify(success=False, error="event_not_found"), 404
-        end_dt = datetime.fromisoformat(str(ev["end_date"]).replace(" ","T"))
-        now = datetime.now(timezone.utc)
-
-        pms = (
-            db.client.table("prediction_markets")
-            .select("id, option_index, resolved")
-            .eq("event_uuid", evu)
-            .order("option_index", desc=False)
-            .execute()
-            .data
-            or []
-        )
-        closed = 0
-        payout_total = 0.0
-        for m in pms:
-            if m.get("resolved"):  # пропускаем закрытые
-                continue
-            idx = int(m["option_index"])
-            w = (winners.get(str(idx)) or winners.get(idx) or "").lower()
-            if w not in ("yes","no"):
-                continue
-            # если срок ещё не наступил — применяем «force»
-            try:
-                if now < end_dt:
-                    rr = (
-                        db.client.rpc("rpc_resolve_market_force", {"p_market_id": int(m["id"]), "p_winner": w})
-                        .execute()
-                        .data
-                        or []
-                    )
-                else:
-                    rr = (
-                        db.client.rpc("rpc_resolve_market_by_id", {"p_market_id": int(m["id"]), "p_winner": w})
-                        .execute()
-                        .data
-                        or []
-                    )
-                if rr:
-                    closed += 1
-                    payout_total += float(rr[0].get("total_payout") or 0)
-            except Exception as e:
-                print("[resolve_one] error:", e)
-                # продолжаем остальные
-                continue
-
-        return jsonify(success=True, closed=closed, payout_total=round(payout_total,4))
-    except Exception as e:
-        print("[/admin/events/resolve] error:", e)
-        return jsonify(success=False, error="server_error"), 500
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
