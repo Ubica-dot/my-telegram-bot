@@ -9,7 +9,7 @@ from functools import wraps
 from collections import deque, defaultdict
 
 import requests
-from flask import Flask, request, render_template_string, jsonify, Response, stream_with_context
+from flask import Flask, request, render_template_string, jsonify, Response, stream_with_context, redirect, url_for
 
 from database import db  # имеет db.client (Supabase)
 
@@ -203,6 +203,65 @@ def legal():
     return Response(LEGAL_HTML, mimetype="text/html")
 
 
+# ---------- Admin (basic) ----------
+ADMIN_HTML = """
+<!doctype html><meta charset="utf-8">
+<title>Admin</title>
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:24px auto;padding:0 16px;line-height:1.4;color:#222}
+ h1{margin:0 0 12px} h2{margin:18px 0 8px}
+ table{width:100%;border-collapse:collapse} th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
+ .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef3ff;border:1px solid #d9e3ff}
+ .btn{border:0;border-radius:8px;padding:6px 10px;cursor:pointer}
+ .ok{background:#e7f6ec;color:#116330} .no{background:#fdecec;color:#7a0b0b}
+</style>
+<h1>Админ-панель</h1>
+<p class="pill">/health: OK</p>
+<h2>Заявки</h2>
+<table>
+  <thead><tr><th>chat_id</th><th>login</th><th>username</th><th>created_at</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for u in pending %}
+    <tr>
+      <td>{{u.chat_id}}</td><td>{{u.login}}</td><td>@{{u.username or ''}}</td><td>{{u.created_at}}</td>
+      <td>
+        <a class="btn ok" href="/admin/approve?chat_id={{u.chat_id}}">Одобрить</a>
+        <a class="btn no" href="/admin/reject?chat_id={{u.chat_id}}">Отклонить</a>
+      </td>
+    </tr>
+  {% endfor %}
+  {% if not pending %}<tr><td colspan="5" class="muted">Нет заявок</td></tr>{% endif %}
+  </tbody>
+</table>
+"""
+
+@app.get("/admin")
+@requires_auth
+def admin_home():
+    pending = []
+    try:
+        pending = db.get_pending_users()
+    except Exception as e:
+        print("[/admin] error:", e)
+    return render_template_string(ADMIN_HTML, pending=pending)
+
+@app.get("/admin/approve")
+@requires_auth
+def admin_approve():
+    chat_id = request.args.get("chat_id", type=int)
+    if chat_id:
+        db.approve_user(chat_id)
+    return redirect(url_for("admin_home"))
+
+@app.get("/admin/reject")
+@requires_auth
+def admin_reject():
+    chat_id = request.args.get("chat_id", type=int)
+    if chat_id:
+        db.reject_user(chat_id)
+    return redirect(url_for("admin_home"))
+
+
 # ---------- Telegram webhook ----------
 @app.post("/webhook")
 def telegram_webhook():
@@ -323,7 +382,7 @@ MINI_APP_HTML = """
     .bm { border:0;background:transparent;cursor:pointer;color:#bbb;font-size:16px; }
     .bm.active { color:#f0b400; }
     .card-head { display:flex; align-items:center; justify-content:space-between; transition: transform .12s ease; }
-    .card-head:active { transform: scale(0.98); } /* лёгкая анимация нажатия */
+    .card-head:active { transform: scale(0.98); }
 
     /* charts */
     .hist { margin-top:8px; padding:10px; border:1px solid #eee; border-radius:10px;
@@ -332,6 +391,17 @@ MINI_APP_HTML = """
 
     .legend { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 0; font-size:12px; color:#444; }
     .legend .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+
+    /* range buttons (rounded) */
+    .range { display:flex; gap:6px; margin-bottom:6px; background:#f0f2f5; padding:4px; border-radius:999px; }
+    .range button { border:0; border-radius:999px; padding:6px 10px; background:transparent; cursor:pointer; font-size:12px; color:#444; }
+    .range button.active { background:#fff; box-shadow:0 2px 6px rgba(0,0,0,.08); color:#111; }
+
+    /* pretty slider for leaders */
+    .seg2 { position:relative; display:inline-grid; grid-template-columns: 1fr 1fr; border-radius:999px; background:#eef2f9; padding:4px; gap:4px; }
+    .seg2 .thumb { position:absolute; top:4px; bottom:4px; width:calc(50% - 4px); border-radius:999px; background:#fff; box-shadow:0 4px 10px rgba(0,0,0,.12); transform:translateX(0); transition:transform .18s ease; }
+    .seg2 button { position:relative; z-index:1; border:0; background:transparent; padding:6px 16px; border-radius:999px; font-weight:700; cursor:pointer; color:#334155; }
+    .seg2 button.active { color:#0b285a; }
 
     /* footer */
     .footer { margin: 40px 6px 10px; text-align:center; }
@@ -404,9 +474,10 @@ MINI_APP_HTML = """
     </div>
     <div id="section-leaders" class="section-body" style="display:none;">
       <div style="display:flex; justify-content:center; margin:8px 0;">
-        <div class="seg" id="seg">
-          <button class="seg-btn active" data-period="week">Неделя</button>
-          <button class="seg-btn" data-period="month">Месяц</button>
+        <div class="seg2" id="seg2" style="min-width:220px">
+          <div class="thumb" id="seg2Thumb"></div>
+          <button class="active" data-period="week">Неделя</button>
+          <button data-period="month">Месяц</button>
         </div>
       </div>
       <div id="lb-range" class="muted" style="margin:6px 0 10px;text-align:center;">—</div>
@@ -526,6 +597,17 @@ MINI_APP_HTML = """
     const ONLY = JSON.parse(localStorage.getItem('onlybm_v1')||'{"events":false,"active":false,"arch":false}');
     function saveONLY(){ localStorage.setItem('onlybm_v1', JSON.stringify(ONLY)); }
 
+    // number formatting RU (credits)
+    function fmtCredits(n){
+      const abs = Math.abs(n);
+      const sign = n < 0 ? "-" : "";
+      const fmt = (x)=> x.toFixed(2).replace('.', ','); // 90,82
+      if (abs < 1000) return sign + fmt(abs);
+      if (abs < 1_000_000) return sign + (Math.round(abs/100)/10).toString().replace('.', ',') + " тыс.";
+      if (abs < 1_000_000_000) return sign + (Math.round(abs/100_000)/10).toString().replace('.', ',') + " млн";
+      return sign + (Math.round(abs/100_000_000)/10).toString().replace('.', ',') + " млрд";
+    }
+
     // Render events (server injects __events)
     const __events = {{ events|tojson|safe }};
     function renderEvents(evts){
@@ -573,9 +655,7 @@ MINI_APP_HTML = """
               <button class="btn yes buy-btn" data-event="${e.event_uuid}" data-index="${idx}" data-side="yes" data-text="${opt.text}">ДА</button>
               <button class="btn no  buy-btn" data-event="${e.event_uuid}" data-index="${idx}" data-side="no"  data-text="${opt.text}">НЕТ</button>`}
             </div>
-            <div class="meta-left">
-              ${ (md.volume||0) >= 1000 ? Math.floor((md.volume||0)/1000)+' тыс. кредитов' : (md.volume||0)+' кредитов' }
-            </div>
+            <div class="meta-left">${fmtCredits(md.volume||0)} кредитов</div>
             <div class="meta-right">До ${md.end_short}</div>`;
           optionsWrap.appendChild(row);
         });
@@ -619,11 +699,10 @@ MINI_APP_HTML = """
     function loadEventChart(container, e){
       const rangeEl = container.querySelector('.range');
       const canvas = container.querySelector('canvas');
-      const legend = container.querySelector('.legend');
+      const legend = container.querySelector('legend');
       const evu = e.event_uuid;
       const draw = async (rng)=>{
         const datasets = [];
-        legend.innerHTML = "";
         const opts = e.options || [];
         for (let idx=0; idx<opts.length; idx++){
           const url = `/api/market/history?event_uuid=${encodeURIComponent(evu)}&option_index=${idx}&range=${rng}`;
@@ -632,9 +711,6 @@ MINI_APP_HTML = """
             if (!r.ok || !data.success || !data.points) continue;
             const ds = data.points.map(p=>({ x: new Date(p.ts).getTime(), y: +p.yes_price }));
             datasets.push({ idx, label: (opts[idx] && opts[idx].text) || ('Вариант '+(idx+1)), color: PALETTE[idx % PALETTE.length], data: ds });
-            const leg = document.createElement('div');
-            leg.innerHTML = `<span class="dot" style="background:${PALETTE[idx % PALETTE.length]}"></span>${(opts[idx] && opts[idx].text) || ('Вариант '+(idx+1))}`;
-            legend.appendChild(leg);
           }catch(_){}
         }
         drawMultiLine(canvas, datasets);
@@ -728,6 +804,25 @@ MINI_APP_HTML = """
       if (btnArch)   btnArch.addEventListener('click',   ()=>{ ONLY.arch   = !ONLY.arch;   saveONLY(); syncBtns(); filterArch(); });
       syncBtns();
 
+      // Лидеры — слайдер
+      const seg2 = document.getElementById('seg2');
+      const thumb = document.getElementById('seg2Thumb');
+      if (seg2 && thumb){
+        const btns = seg2.querySelectorAll('button');
+        function setActive(idx){
+          btns.forEach((b,i)=> b.classList.toggle('active', i===idx));
+          thumb.style.transform = `translateX(${idx*100}%)`;
+        }
+        seg2.addEventListener('click', (e)=>{
+          const b = e.target.closest('button'); if (!b) return;
+          const idx = [...btns].indexOf(b);
+          setActive(idx);
+          const period = b.dataset.period || 'week';
+          fetchLeaderboard(period);
+        });
+        setActive(0);
+      }
+
       // Первичная фильтрация
       filterActive(); filterEvents(); filterArch();
     }
@@ -797,19 +892,8 @@ MINI_APP_HTML = """
       }
     }
 
-    // Поправка архива: если название события отсутствует ('—'), обогащаем по последним ордерам пользователя
+    // Архив (если в некоторых строках нет названия — сервер уже обогащает; здесь просто рендер)
     async function renderArchive(container, chatId, rows){
-      const needFix = rows.some(r => !r.event_name || r.event_name === '—' || r.event_name === '-');
-      if (needFix){
-        try{
-          const resp = await fetch(`/api/user_orders?chat_id=${chatId}${SIG ? '&sig='+encodeURIComponent(SIG) : ''}`);
-          if (resp.ok){
-            const mo = await resp.json(); // {orders:[{market_id,created_at}]}
-            rows = enrichArchiveWithOrders(rows, mo.orders||[]);
-          }
-        }catch(_){}
-      }
-
       container.innerHTML = "";
       if (!rows.length){ container.innerHTML = `<div class="muted">Архив пуст.</div>`; return; }
       rows.forEach((it, idx)=>{
@@ -841,21 +925,7 @@ MINI_APP_HTML = """
       if (qR) qR.dispatchEvent(new Event('input'));
     }
 
-    function enrichArchiveWithOrders(rows, orders){
-      try{
-        const ords = (orders||[]).map(o => ({ market_id: +o.market_id, ts: new Date(o.created_at).getTime() })).sort((a,b)=>a.ts-b.ts);
-        // На фронте не знаем names — сервер обогащает в /api/me, этот шаг «мягкий»
-        return rows;
-      }catch(_){ return rows; }
-    }
-
     // Leaders
-    document.getElementById('seg').addEventListener('click', (e)=>{
-      const b = e.target.closest('.seg-btn'); if (!b) return;
-      document.querySelectorAll('#seg .seg-btn').forEach(x=>x.classList.toggle('active', x===b));
-      fetchLeaderboard(b.dataset.period||'week');
-    });
-
     async function fetchLeaderboard(period='week'){
       const lb = document.getElementById("lb-container");
       const rng= document.getElementById("lb-range");
