@@ -31,7 +31,7 @@ def _check_auth(u, p):
 
 
 def _auth_required():
-    return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="Admin'"})
+    return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="Admin"'})
 
 
 def requires_auth(fn):
@@ -522,7 +522,7 @@ MINI_APP_HTML = """
     function isBM(cat, key){ return !!(BMS[cat] && BMS[cat][key]); }
     function toggleBM(cat, key, btn){ BMS[cat][key] = !isBM(cat,key); saveBMS(); if(btn){ btn.classList.toggle('active', BMS[cat][key]); } }
 
-    // Only-bookmarks flags (иконки-звёзды)
+    // Only-bookmarks flags
     const ONLY = JSON.parse(localStorage.getItem('onlybm_v1')||'{"events":false,"active":false,"arch":false}');
     function saveONLY(){ localStorage.setItem('onlybm_v1', JSON.stringify(ONLY)); }
 
@@ -546,7 +546,6 @@ MINI_APP_HTML = """
         head.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('events', bmKey, ev.currentTarget); };
         head.onclick = ()=> toggleHistory(card, e);
 
-        // тело карточки
         const bodyWrap = document.createElement('div');
         const pDesc = document.createElement('p');
         pDesc.className = 'muted desc';
@@ -581,7 +580,6 @@ MINI_APP_HTML = """
           optionsWrap.appendChild(row);
         });
 
-        // контейнер графика (один на мероприятие)
         const hist = document.createElement('div');
         hist.className = 'hist';
         hist.style.display = 'none';
@@ -657,7 +655,7 @@ MINI_APP_HTML = """
       datasets.forEach(ds=>{
         ds.data.forEach(p=>{ if (p.x<xmin) xmin=p.x; if (p.x>xmax) xmax=p.x; });
       });
-      if (!isFinite(xmin) or !isFinite(xmax)){ xmin = Date.now()-3600e3; xmax = Date.now(); }
+      if (!isFinite(xmin) || !isFinite(xmax)){ xmin = Date.now()-3600e3; xmax = Date.now(); }
       ctx.strokeStyle='#eee'; ctx.lineWidth=1;
       for (let i=0;i<=4;i++){ const y = P + (H-2*P)*(i/4); ctx.beginPath(); ctx.moveTo(P,y); ctx.lineTo(W-P,y); ctx.stroke(); }
       ctx.fillStyle='#444'; ctx.font='12px system-ui'; ctx.fillText('Цена ДА', P, P-10); ctx.fillText('0', 5, H-P); ctx.fillText('1', 5, P);
@@ -687,9 +685,9 @@ MINI_APP_HTML = """
         const cards = document.getElementById('active').querySelectorAll('.card');
         cards.forEach(c=>{
           const key = c.dataset.key || '';
-          const showBM = not onlyBM or isBM('active', key);
-          const showQ  = not needle or c.innerText.toLowerCase().includes(needle);
-          c.style.display = (showBM and showQ) ? '' : 'none';
+          const showBM = !onlyBM || isBM('active', key);
+          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
+          c.style.display = (showBM && showQ) ? '' : 'none';
         });
       }
       function filterArch(){
@@ -698,9 +696,9 @@ MINI_APP_HTML = """
         const rows = document.getElementById('arch').querySelectorAll('.card');
         rows.forEach(c=>{
           const key = c.dataset.key || '';
-          const showBM = not onlyBM or isBM('arch', key);
-          const showQ  = not needle or c.innerText.toLowerCase().includes(needle);
-          c.style.display = (showBM and showQ) ? '' : 'none';
+          const showBM = !onlyBM || isBM('arch', key);
+          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
+          c.style.display = (showBM && showQ) ? '' : 'none';
         });
       }
       function filterEvents(){
@@ -710,14 +708,11 @@ MINI_APP_HTML = """
         [...cards].forEach(c=>{
           const key = c.dataset.event || '';
           const tags = (c.dataset.tags || '').toLowerCase();
-          const showBM = not onlyBM or isBM('events', key);
-          const showQ  = not needle or c.innerText.toLowerCase().includes(needle) or tags.includes(needle);
-          c.style.display = (showBM and showQ) ? '' : 'none';
+          const showBM = !onlyBM || isBM('events', key);
+          const showQ  = !needle || c.innerText.toLowerCase().includes(needle) || tags.includes(needle);
+          c.style.display = (showBM && showQ) ? '' : 'none';
         });
       }
-
-      // исправление синтаксиса JS (not/and/or -> !/&&/||)
-      function _fix(){}
 
       if (qA) qA.addEventListener('input', filterActive);
       if (qR) qR.addEventListener('input', filterArch);
@@ -804,12 +799,10 @@ MINI_APP_HTML = """
 
     // Поправка архива: если название события отсутствует ('—'), обогащаем по последним ордерам пользователя
     async function renderArchive(container, chatId, rows){
-      // Если все ок — просто рисуем
       const needFix = rows.some(r => !r.event_name || r.event_name === '—' || r.event_name === '-');
       if (needFix){
         try{
-          // Подтянем все ордера пользователя (ограничим 2000, по времени)
-          const resp = await fetch(`/api/user_orders?chat_id=${chatId}`);
+          const resp = await fetch(`/api/user_orders?chat_id=${chatId}${SIG ? '&sig='+encodeURIComponent(SIG) : ''}`);
           if (resp.ok){
             const mo = await resp.json(); // {orders:[{market_id,created_at}]}
             rows = enrichArchiveWithOrders(rows, mo.orders||[]);
@@ -844,32 +837,15 @@ MINI_APP_HTML = """
         container.appendChild(el);
       });
 
-      // применим фильтр по текущим флажкам
       const qR = document.getElementById('qArch');
       if (qR) qR.dispatchEvent(new Event('input'));
     }
 
-    // Утилита: обогащение архива по ордерам (наиболее близкий ордер по времени <= payout ts)
     function enrichArchiveWithOrders(rows, orders){
       try{
-        // Преобразуем строки дат
         const ords = (orders||[]).map(o => ({ market_id: +o.market_id, ts: new Date(o.created_at).getTime() })).sort((a,b)=>a.ts-b.ts);
-        if (!ords.length) return rows;
-        // соберём справочники рынков/событий пачкой через hidden endpoint (ниже)
-        return rows.map(r => {
-          if (r.event_name && r.event_name !== '—') return r;
-          const t = r.resolved_at ? new Date(r.resolved_at).getTime() : Infinity;
-          let cand = null;
-          for (let i=0;i<ords.length;i++){
-            if (ords[i].ts <= t) cand = ords[i];
-            else break;
-          }
-          if (!cand) cand = ords[ords.length-1];
-          if (!cand) return r;
-          // на фронте нет доступа к БД — вернём как есть; серверный /api/user_orders уже подставит имена при отдаче (реализовано ниже)
-          // Здесь только вернём r (серверная обогащение, см. ниже)
-          return r;
-        });
+        // На фронте не знаем names — сервер обогащает в /api/me, этот шаг «мягкий»
+        return rows;
       }catch(_){ return rows; }
     }
 
@@ -892,7 +868,12 @@ MINI_APP_HTML = """
         lb.innerHTML = items.length ? "" : "Пока нет данных.";
         items.slice(0,50).forEach((it,i)=>{
           const row = document.createElement('div');
-          row.style.display='grid'; row.style.gridTemplateColumns='32px 40px 1fr auto'; row.style.alignItems='center'; row.style.gап='8px'; row.style.padding='6px 0'; row.style.borderBottom='1px solid #eee';
+          row.style.display='grid';
+          row.style.gridTemplateColumns='32px 40px 1fr auto';
+          row.style.alignItems='center';
+          row.style.gap='8px';
+          row.style.padding='6px 0';
+          row.style.borderBottom='1px solid #eee';
           row.innerHTML = `
             <div style="text-align:center;font-weight:800;color:#444;">${i+1}</div>
             <div style="position:relative;width:32px;height:32px;">
@@ -1056,23 +1037,22 @@ def api_me():
     # Доп. обогащение архива: если нет event_name — подставляем по последним ордерам пользователя
     if any((not r.get("event_name")) or r.get("event_name") in ("—", "-") for r in archive):
         try:
-            # забираем ордера пользователя (легкий вспомогательный endpoint ниже)
-            orders_resp = api_user_orders_internal(chat_id=chat_id)
-            if orders_resp[1] == 200:
-                orders = orders_resp[0].json["orders"]
-                # соберем справочник по рынкам
+            data, status = api_user_orders_internal(chat_id=chat_id)
+            if status == 200:
+                orders = data.get("orders", [])
                 mids = sorted({int(o["market_id"]) for o in orders if o.get("market_id") is not None})
                 pm = db.client.table("prediction_markets").select("id, event_uuid, option_index, winner_side, resolved_at").in_("id", mids).execute().data or []
                 pm_map = {int(x["id"]): x for x in pm}
                 evus = sorted({x["event_uuid"] for x in pm if x.get("event_uuid")})
                 evs = db.client.table("events").select("event_uuid, name, options").in_("event_uuid", evus).execute().data or []
                 ev_map = {x["event_uuid"]: x for x in evs}
-                # обогащаем
-                def ts(s): 
-                    try: 
+
+                def ts(s):
+                    try:
                         return datetime.fromisoformat(str(s).replace(" ", "T")).timestamp()
-                    except Exception: 
-                        return 0
+                    except Exception:
+                        return 0.0
+
                 ords = [{"market_id": int(o["market_id"]), "ts": ts(o["created_at"])} for o in orders if o.get("market_id") is not None]
                 ords.sort(key=lambda z: z["ts"])
                 for r in archive:
@@ -1086,10 +1066,10 @@ def api_me():
                         else:
                             break
                     cand = cand or (ords[-1] if ords else None)
-                    if not cand: 
+                    if not cand:
                         continue
                     pmx = pm_map.get(int(cand["market_id"]))
-                    if not pmx: 
+                    if not pmx:
                         continue
                     evx = ev_map.get(pmx.get("event_uuid") or "")
                     if not evx:
@@ -1138,13 +1118,14 @@ def api_userpic():
         return Response(status=204)
 
 
-# Вспомогательный endpoint для фронтового обогащения архива (при необходимости)
+# Вспомогательный endpoint для ордеров пользователя
 @app.get("/api/user_orders")
 def api_user_orders():
     chat_id, err = auth_chat_id_from_request()
     if err:
         return jsonify({"orders": []}), 200
-    return api_user_orders_internal(chat_id=chat_id)[0], 200
+    data, status = api_user_orders_internal(chat_id=chat_id)
+    return jsonify(data), status
 
 def api_user_orders_internal(chat_id: int):
     try:
@@ -1158,10 +1139,10 @@ def api_user_orders_internal(chat_id: int):
             .data
             or []
         )
-        return jsonify({"orders": rows}), 200
+        return {"orders": rows}, 200
     except Exception as e:
         print("[api_user_orders] error:", e)
-        return jsonify({"orders": []}), 200
+        return {"orders": []}, 200
 
 
 @app.get("/api/leaderboard")
@@ -1194,8 +1175,6 @@ def api_leaderboard():
     for it in items_raw:
         earned = max(float(it.get("payouts", 0) or 0), 0.0)
         items.append({"login": it.get("login"), "username": it.get("username"), "earned": earned})
-
-    # сортировка по доходу
     items.sort(key=lambda x: x["earned"], reverse=True)
 
     return jsonify(success=True, week={"start": start, "end": end, "label": label}, items=items)
