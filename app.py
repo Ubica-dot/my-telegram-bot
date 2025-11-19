@@ -9,9 +9,16 @@ from functools import wraps
 from collections import deque, defaultdict
 
 import requests
-from flask import Flask, request, render_template_string, jsonify, Response, stream_with_context
+from flask import (
+    Flask,
+    request,
+    render_template_string,
+    jsonify,
+    Response,
+    stream_with_context,
+)
 
-from database import db  # имеет db.client (Supabase)
+from database import db  # db.client = Supabase client
 
 app = Flask(__name__)
 
@@ -20,8 +27,10 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 BASE_URL = os.getenv("WEBHOOK_URL")
 TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "change-me")
+
 ADMIN_BASIC_USER = os.getenv("ADMIN_BASIC_USER", "admin")
 ADMIN_BASIC_PASS = os.getenv("ADMIN_BASIC_PASS", "admin")
+
 WEBAPP_SIGNING_SECRET = os.getenv("WEBAPP_SIGNING_SECRET")  # обязателен
 
 
@@ -41,6 +50,7 @@ def requires_auth(fn):
         if not auth or not _check_auth(auth.username, auth.password):
             return _auth_required()
         return fn(*args, **kwargs)
+
     return wrapper
 
 
@@ -115,11 +125,13 @@ def verify_telegram_init_data(init_data: str, max_age: int = 86400):
             return None, "bad_auth_date"
         if auth_date <= 0 or (int(time.time()) - auth_date) > max_age:
             return None, "stale"
+
         data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs.keys()))
         secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
         expected = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, recv_hash):
             return None, "bad_hash"
+
         user = {}
         if "user" in pairs and pairs["user"]:
             try:
@@ -140,12 +152,13 @@ def verify_telegram_init_data(init_data: str, max_age: int = 86400):
 
 
 def auth_chat_id_from_request():
+    # 1) Telegram initData
     init_str = request.args.get("init")
     payload = None
     if request.method in ("POST", "PUT", "PATCH"):
         payload = request.get_json(silent=True) or {}
-        if not init_str:
-            init_str = payload.get("init")
+    if not init_str:
+        init_str = (payload or {}).get("init")
     if init_str:
         info, err = verify_telegram_init_data(init_str)
         if err:
@@ -162,6 +175,8 @@ def auth_chat_id_from_request():
         if chat_id_param is not None and chat_id_param != user_id:
             return None, "chat_id_mismatch"
         return user_id, None
+
+    # 2) chat_id + sig
     chat_id = request.args.get("chat_id", type=int)
     sig = request.args.get("sig", "")
     if payload:
@@ -184,20 +199,15 @@ def index():
 
 
 LEGAL_HTML = """
-<!doctype html><meta charset="utf-8">
-<title>Правила и политика конфиденциальности</title>
-<style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:780px;margin:24px auto;padding:0 16px;line-height:1.55;color:#222}
-  h1{margin:0 0 12px}
-  h2{margin:18px 0 8px}
-  p{margin:8px 0}
-</style>
-<h1>Условия использования</h1>
+<h1>Правила и политика конфиденциальности</h1>
+<h2>Условия использования</h2>
 <p>Это учебная платформа предсказательных рынков. Нет реальных денег. Котировки волатильны — вы можете потерять игровые кредиты.</p>
 <h2>Политика конфиденциальности</h2>
 <p>Храним минимальные данные Telegram (chat_id, логин), историю сделок и баланс. Данные не продаются и не передаются третьим лицам.</p>
 <p>Вопросы — админу бота.</p>
 """
+
+
 @app.get("/legal")
 def legal():
     return Response(LEGAL_HTML, mimetype="text/html")
@@ -226,7 +236,7 @@ def telegram_webhook():
         if not user:
             send_message(
                 chat_id,
-                "Добро пожаловать! Напишите ваш желаемый логин одним сообщением. После модерации получите доступ к приложению."
+                "Добро пожаловать! Напишите ваш желаемый логин одним сообщением.\nПосле модерации получите доступ к приложению.",
             )
         else:
             if status == "approved":
@@ -235,31 +245,32 @@ def telegram_webhook():
                     send_message(chat_id, "Сервис временно недоступен. Повторите позже.")
                     return "ok"
                 web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-                kb = { "inline_keyboard": [ [{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}] ] }
-                send_message(chat_id, "Приложение готово. Открывайте:", kb)
+                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]}
+                send_message(chat_id, "Приложение готово.\nОткрывайте:", kb)
             elif status == "pending":
                 send_message(chat_id, "⏳ Ваша заявка на регистрацию ожидает проверки администратором.")
             elif status == "banned":
                 send_message(chat_id, "🚫 Доступ к приложению запрещён.")
             elif status == "rejected":
-                send_message(chat_id, "❌ Заявка отклонена. Отправьте новый логин одним сообщением для повторной подачи.")
+                send_message(chat_id, "❌ Заявка отклонена.\nОтправьте новый логин одним сообщением для повторной подачи.")
             else:
                 send_message(chat_id, "Напишите ваш логин одним сообщением для регистрации.")
         return "ok"
 
+    # логин без команды
     if not text.startswith("/"):
         if not user:
             new_user = db.create_user(chat_id, text, username)
             if new_user:
-                send_message(chat_id, f"✅ Логин '{text}' отправлен на модерацию. Ожидайте подтверждения.")
-                notify_admin(f"Новая заявка:\nЛогин: {text}\nID: {chat_id}\nUsername: @{username}\nАдминка: {BASE_URL}/admin")
+                send_message(chat_id, f"✅ Логин '{text}' отправлен на модерацию.\nОжидайте подтверждения.")
+                notify_admin(
+                    f"Новая заявка:\nЛогин: {text}\nID: {chat_id}\nUsername: @{username}\nАдминка: {BASE_URL}/admin"
+                )
             else:
                 send_message(chat_id, "❌ Ошибка при создании заявки. Попробуйте ещё раз.")
         else:
             if status == "pending":
-                send_message(chat_id, "⏳ Заявка уже на рассмотрении. Ожидайте ответа администратора.")
-            elif status == "approved":
-                pass
+                send_message(chat_id, "⏳ Заявка уже на рассмотрении.\nОжидайте ответа администратора.")
             elif status == "banned":
                 send_message(chat_id, "🚫 Доступ запрещён.")
         return "ok"
@@ -272,617 +283,257 @@ MINI_APP_HTML = """
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>U — мини‑приложение</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    :root{ --spot-x:50%; --spot-y:50%; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }
-    .row { display:flex; align-items:center; gap:12px; }
-    .muted { color:#666; }
-    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-bottom: 14px; background:#fff }
-    .opt  { padding: 10px; border: 1px dashed #ccc; border-radius: 10px; margin: 6px 0;
-            display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: stretch; }
-    .opt-title { display:flex; align-items:center; font-weight: 700; }
-    .btn  { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-size: 15px; font-weight: 700;
-            transition: background-color .18s ease, color .18s ease; min-width: 92px; min-height: 42px; }
-    .yes  { background: #CDEAD2; color: #2e7d32; }
-    .no   { background: #F3C7C7; color: #c62828; }
-    .yes:hover { background: #2e7d32; color: #CDEAD2; }
-    .no:hover  { background: #c62828; color: #F3C7C7; }
-    .actions { display:flex; gap: 8px; align-items: stretch; height: 100%; }
-    .actions .btn { height: 100%; display:flex; align-items:center; justify-content:center; }
-    .meta-left  { grid-column: 1; font-size: 12px; color: #666; margin-top: 6px; }
-    .meta-right { grid-column: 3; justify-self: end; font-size: 12px; color: #666; margin-top: 6px; }
-    .section { margin: 18px 0; }
-    .section-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px;
-                    background:#f5f5f5; border-radius:10px; cursor:pointer; user-select:none; position: relative; overflow:hidden; }
-    .section-title { font-weight:700; }
-    .caret { transition: transform .15s ease; }
-    .collapsed .caret { transform: rotate(-90deg); }
-    .section-body { padding:10px 0 0 0; }
-    .prob { color:#000; font-weight:800; font-size:18px; display:flex; align-items:center; justify-content:flex-end; padding: 0 4px; }
-    .hover-spot::after{
-      content:""; position:absolute; inset:0; pointer-events:none;
-      background: radial-gradient(200px circle at var(--spot-x) var(--spot-y), rgba(0,0,0,.06), transparent 60%);
-      opacity:0; transition: opacity .15s ease;
-    }
-    .hover-spot:hover::after{ opacity:1; }
-
-    /* header */
-    .header { display:flex; align-items:center; gap:12px; }
-    .avatar { width: 56px; height: 56px; border-radius: 50%; border: 2px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,.06); object-fit:cover; }
-    .avatarPH { width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;
-                background: radial-gradient(circle at 30% 30%, #6a5acd, #00bcd4); text-transform: uppercase; }
-    .usr { display:flex; flex-direction:column; gap:2px; }
-    .uname { font-weight:900; font-size:18px; }
-    .ubal { font-weight:900; font-size:14px; color:#0b8457; }
-
-    input[type=text] { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; }
-    .toolbar { display:flex; gap:8px; align-items:center; }
-    .chk { display:inline-flex; gap:6px; align-items:center; font-size:12px; color:#666; }
-
-    /* leaders switch */
-    .seg { display:inline-flex; background:#f0f0f0; border-radius:999px; padding:4px; gap:4px; }
-    .seg-btn { border:0; background:transparent; padding:6px 12px; border-radius:999px; font-weight:700; cursor:pointer; color:#444; transition:all .15s ease; }
-    .seg-btn.active { background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.08); color:#111; }
-
-    /* bookmark */
-    .bm { border:0;background:transparent;cursor:pointer;color:#bbb;font-size:16px; }
-    .bm.active { color:#f0b400; }
-    .card-head { display:flex; align-items:center; justify-content:space-between; }
-
-    /* charts */
-    .hist { margin-top:8px; padding:10px; border:1px solid #eee; border-radius:10px; }
-    .range { display:flex; gap:6px; margin-bottom:6px; }
-    .range button { border:0; border-radius:999px; padding:4px 10px; background:#f0f0f0; cursor:pointer; font-size:12px; }
-    .range button.active { background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.08); }
-
-    /* footer */
-    .footer { margin: 40px 6px 10px; text-align:center; }
-    .footer a { color:#9aa; text-decoration:none; font-size:12px; opacity:.6; }
-    .footer a:hover { opacity:.9; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; background: #0b0d12; color: #e5e7eb; }
+    a { color: #93c5fd; text-decoration: none; }
+    .muted { color: #9aa3b2; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    .section { margin-bottom: 20px; background: #11141b; border-radius: 12px; padding: 12px 12px 2px; border: 1px solid #1b2230; }
+    .section h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; display:flex; align-items:center; justify-content:space-between; }
+    .pill { display: inline-block; padding: 2px 8px; background:#192031; border:1px solid #263049; color:#cbd5e1; border-radius:999px; font-size:12px; }
+    .event-card { background:#0f1320; border:1px solid #1b2232; border-radius:12px; padding:12px; margin-bottom:10px; transition: transform 120ms ease, box-shadow 120ms ease; }
+    .event-card:active { transform: scale(0.98); box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+    .event-title { font-weight:600; margin:0 0 4px; }
+    .event-description { color:#9aa3b2; font-size: 14px; margin-bottom:8px; }
+    .event-meta { display:flex; gap:12px; font-size:12px; color:#9aa3b2; margin-bottom:8px; }
+    .options { display:flex; flex-wrap:wrap; gap:8px; }
+    .option { flex:1 1 120px; background:#121a2a; border:1px solid #1e2a44; border-radius:10px; padding:8px; }
+    .price { font-weight:600; color:#e6edf7; }
+    .event-chart { opacity: 0; transform: translateY(-4px); transition: opacity .25s ease, transform .25s ease; margin: 6px -4px 0; padding: 6px 4px 0; }
+    .event-chart.visible { opacity: 1; transform: translateY(0); }
+    .icon-btn { background: none; border: 0; font-size: 18px; cursor: pointer; color: #9aa3b2; }
+    .icon-btn[aria-pressed="true"] { color: #ff6b6b; }
+    .footer { text-align:center; margin-top: 24px; font-size: 12px; }
+    .grid { display:grid; grid-template-columns: 1fr; gap:12px; }
+    @media (min-width: 900px){ .grid { grid-template-columns: 1fr 1fr; } }
   </style>
 </head>
 <body>
+  <div class="grid">
+    <section class="section">
+      <h2>Активные ставки <span><button id="onlyBookmarksBtn1" class="icon-btn" aria-pressed="false" title="Показать только закладки">🔖</button></span></h2>
+      <div id="positions">Загрузка...</div>
+    </section>
 
-  <!-- Header -->
-  <div class="header">
-    <div id="avaPH" class="avatarPH">U</div>
-    <img id="avaIMG" class="avatar" alt="avatar" style="display:none">
-    <div class="usr">
-      <div id="uname" class="uname">—</div>
-      <div id="ubal" class="ubal">Баланс: —</div>
-    </div>
+    <section class="section">
+      <h2>Мероприятия <span><button id="onlyBookmarksBtn2" class="icon-btn" aria-pressed="false" title="Показать только закладки">🔖</button></span></h2>
+      <div id="events"></div>
+    </section>
+
+    <section class="section">
+      <h2>Прошедшие ставки (архив) <span><button id="onlyBookmarksBtn3" class="icon-btn" aria-pressed="false" title="Показать только закладки">🔖</button></span></h2>
+      <div id="archive">Загрузка...</div>
+    </section>
+
+    <section class="section">
+      <h2>Таблица лидеров <span class="muted" style="font-weight:400">
+        <button class="pill" id="lbWeek">Неделя</button>
+        <button class="pill" id="lbMonth">Месяц</button></span></h2>
+      <div id="leaderboard">Загрузка…</div>
+    </section>
   </div>
 
-  <!-- Активные ставки -->
-  <div id="wrap-active" class="section">
-    <div id="head-active" class="section-head hover-spot" onclick="toggleSection('active')">
-      <span class="section-title">Активные ставки</span>
-      <span id="caret-active" class="caret">▾</span>
-    </div>
-    <div id="section-active" class="section-body">
-      <div class="toolbar" style="margin:6px 0 8px">
-        <input id="qActive" type="text" placeholder="Поиск по активным ставкам">
-        <label class="chk"><input id="fActiveBM" type="checkbox"> только закладки</label>
-      </div>
-      <div id="active" class="muted">Загрузка...</div>
-    </div>
-  </div>
-
-  <!-- Мероприятия -->
-  <div id="wrap-events" class="section">
-    <div id="head-events" class="section-head hover-spot" onclick="toggleSection('events')">
-      <span class="section-title">Мероприятия</span>
-      <span id="caret-events" class="caret">▾</span>
-    </div>
-    <div id="section-events" class="section-body">
-      <div class="toolbar" style="margin:6px 0 8px">
-        <input id="qEvents" type="text" placeholder="Поиск по событиям и тегам">
-        <label class="chk"><input id="fEventsBM" type="checkbox"> только закладки</label>
-      </div>
-      <div id="events-list"></div>
-    </div>
-  </div>
-
-  <!-- Архив ставок -->
-  <div id="wrap-arch" class="section">
-    <div id="head-arch" class="section-head hover-spot" onclick="toggleSection('arch')">
-      <span class="section-title">Прошедшие ставки (архив)</span>
-      <span id="caret-arch" class="caret">▾</span>
-    </div>
-    <div id="section-arch" class="section-body">
-      <div class="toolbar" style="margin:6px 0 8px">
-        <input id="qArch" type="text" placeholder="Поиск по архиву">
-        <label class="chk"><input id="fArchBM" type="checkbox"> только закладки</label>
-      </div>
-      <div id="arch" class="muted">Загрузка...</div>
-    </div>
-  </div>
-
-  <!-- Таблица лидеров -->
-  <div id="wrap-leaders" class="section">
-    <div id="head-leaders" class="section-head hover-spot" onclick="toggleLeaders()">
-      <span class="section-title">Таблица лидеров</span>
-      <span id="caret-leaders" class="caret">▸</span>
-    </div>
-    <div id="section-leaders" class="section-body" style="display:none;">
-      <div style="display:flex; justify-content:center; margin:8px 0;">
-        <div class="seg" id="seg">
-          <button class="seg-btn active" data-period="week">Неделя</button>
-          <button class="seg-btn" data-period="month">Месяц</button>
-        </div>
-      </div>
-      <div id="lb-range" class="muted" style="margin:6px 0 10px;text-align:center;">—</div>
-      <div id="lb-container" class="muted">Загрузка…</div>
-    </div>
-  </div>
-
-  <!-- Footer -->
   <div class="footer">
-    <a href="/legal" target="_blank" rel="noopener">Правила и политика конфиденциальности</a>
+    <a href="/legal" target="_blank">Правила и политика конфиденциальности</a>
   </div>
 
-  <!-- Покупка -->
-  <div id="modalBg" class="modal-bg" style="position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items:center; justify-content:center;">
-    <div class="modal" style="background:#fff; border-radius:12px; padding:16px; width:90%; max-width:400px;">
-      <h3 id="mTitle" style="margin:0 0 8px 0;">Покупка</h3>
-      <div class="muted" id="mSub">Укажите сумму, не выше вашего баланса.</div>
-      <div class="row" style="margin-top:10px;">
-        <label>Сумма (кредиты):&nbsp;</label>
-        <input type="number" id="mAmount" min="1" step="1" value="100"/>
-      </div>
-      <div class="row" style="margin-top:12px; gap:8px;">
-        <button class="btn yes" onclick="confirmBuy()">Купить</button>
-        <button class="btn no"  onclick="closeBuy()">Отмена</button>
-      </div>
-    </div>
-  </div>
-
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <script>
-    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-    if (tg) tg.ready();
+    // Parse URL params
+    const url = new URL(location.href);
+    const chatId = Number(url.searchParams.get('chat_id'));
+    const sig = url.searchParams.get('sig');
 
-    const qs = new URLSearchParams(location.search);
-    const CHAT_ID = qs.get("chat_id");
-    const SIG = qs.get("sig") || "";
-    const INIT = tg && tg.initData ? tg.initData : "";
+    // Simple helpers
+    const fmtPct = (x) => (x * 100).toFixed(1) + '%';
 
-    function getChatId() {
-      if (CHAT_ID) return CHAT_ID;
-      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) return tg.initDataUnsafe.user.id;
-      return null;
+    // Bookmarks
+    const BM_SET_KEY = 'bookmarks';
+    const ONLY_BM_KEY = 'onlyBookmarks';
+    const bookmarks = new Set(JSON.parse(localStorage.getItem(BM_SET_KEY) || '[]'));
+    function isBookmarked(event_uuid) { return bookmarks.has(event_uuid); }
+    function toggleBookmark(event_uuid) {
+      if (bookmarks.has(event_uuid)) bookmarks.delete(event_uuid);
+      else bookmarks.add(event_uuid);
+      localStorage.setItem(BM_SET_KEY, JSON.stringify([...bookmarks]));
+      refreshLists();
     }
-
-    // radial hover
-    document.addEventListener('pointermove', (e) => {
-      const head = e.target.closest('.hover-spot');
-      if (!head) return;
-      const rect = head.getBoundingClientRect();
-      head.style.setProperty('--spot-x', (e.clientX - rect.left) + 'px');
-      head.style.setProperty('--spot-y', (e.clientY - rect.top) + 'px');
-    });
-
-    // sections
-    function toggleSection(name){
-      const b = document.getElementById("section-"+name);
-      const c = document.getElementById("caret-"+name);
-      const h = document.getElementById("head-"+name);
-      const key = "collapse_"+name;
-      const shown = b.style.display !== "none";
-      if (shown){ b.style.display="none"; c.textContent="▸"; h.classList.add("collapsed"); try{localStorage.setItem(key,"1");}catch(e){} }
-      else { b.style.display="block"; c.textContent="▾"; h.classList.remove("collapsed"); try{localStorage.setItem(key,"0");}catch(e){} }
+    function applyBookmarksFilter(items) {
+      const active = localStorage.getItem(ONLY_BM_KEY) === 'true';
+      if (!active) return items;
+      return (items || []).filter(ev => isBookmarked(ev.event_uuid));
     }
-    function toggleLeaders(){
-      const b = document.getElementById("section-leaders");
-      const c = document.getElementById("caret-leaders");
-      const h = document.getElementById("head-leaders");
-      const shown = b.style.display !== "none";
-      if (shown){ b.style.display="none"; c.textContent="▸"; h.classList.add("collapsed"); }
-      else { b.style.display="block"; c.textContent="▾"; h.classList.remove("collapsed"); if (!toggleLeaders._loaded){ fetchLeaderboard('week'); toggleLeaders._loaded=true; } }
-    }
-
-    // header fill
-    function fillHeader(login, balance){
-      const ph = document.getElementById('avaPH');
-      const img= document.getElementById('avaIMG');
-      const uname = document.getElementById('uname');
-      const ubal = document.getElementById('ubal');
-
-      const tgUser = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
-      const nick = (login || (tgUser && (tgUser.username || tgUser.first_name)) || "Профиль");
-      uname.textContent = nick;
-
-      const balText = (typeof balance === 'number' && !isNaN(balance)) ? balance.toFixed(2) : "—";
-      ubal.textContent = "Баланс: " + balText + " кредитов";
-
-      function tryImg(src){
-        if (!src) return false;
-        img.onload = ()=>{ img.style.display='block'; ph.style.display='none'; }
-        img.onerror= ()=>{ img.style.display='none'; ph.style.display='flex'; }
-        img.src = src; return true;
-      }
-      let initials = "";
-      if (tgUser){
-        if (tgUser.first_name) initials += tgUser.first_name[0];
-        if (tgUser.last_name)  initials += tgUser.last_name[0];
-        if (!initials && tgUser.username) initials = tgUser.username.slice(0,2);
-      } else if (login) { initials = String(login).slice(0,2); }
-      ph.textContent = (initials || "U").toUpperCase();
-
-      if (tgUser && tgUser.photo_url) { if (tryImg(tgUser.photo_url)) return; }
-      const cid = getChatId();
-      if (cid){
-        let url = `/api/userpic?chat_id=${cid}`;
-        if (SIG) url += `&sig=${SIG}`;
-        if (INIT) url += `&init=${encodeURIComponent(INIT)}`;
-        tryImg(url);
-      }
-    }
-
-    // bookmarks
-    const BMS = JSON.parse(localStorage.getItem('bookmarks_v1')||'{"events":{},"active":{},"arch":{}}');
-    function saveBMS(){ localStorage.setItem('bookmarks_v1', JSON.stringify(BMS)); }
-    function isBM(cat, key){ return !!(BMS[cat] && BMS[cat][key]); }
-    function toggleBM(cat, key, btn){ BMS[cat][key] = !isBM(cat,key); saveBMS(); if(btn){ btn.classList.toggle('active', BMS[cat][key]); } }
-
-    // Render events (server injects __events)
-    const __events = {{ events|tojson|safe }};
-    function renderEvents(evts){
-      const list = document.getElementById('events-list');
-      list.innerHTML = "";
-      evts.forEach(e=>{
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.dataset.event = e.event_uuid;
-        card.dataset.tags = (e.tags||[]).join(',');
-        card.dataset.end = e.end_ts || 0;
-        card.dataset.vol = e.total_volume || 0;
-
-        const bmKey = e.event_uuid;
-        const head = document.createElement('div');
-        head.className = 'card-head';
-        head.innerHTML = `<div><b>${e.name}</b></div><button class="bm ${isBM('events',bmKey)?'active':''}" title="Закладка">★</button>`;
-        head.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('events', bmKey, ev.currentTarget); };
-        head.onclick = ()=> toggleHistory(card, e);
-
-        let body = `<p class="muted">${e.description}</p>`;
-        if (e.tags && e.tags.length) body += `<div class="muted">Теги: ${e.tags.join(', ')}</div>`;
-
-        (e.options||[]).forEach((opt, idx)=>{
-          const md = (e.markets && e.markets[idx]) || {yes_price:0.5, volume:0, end_short:e.end_short, resolved:false, winner_side:null};
-          const yes_pct = Math.round((md.yes_price||0.5)*100);
-          body += `
-            <div class="opt" data-option="${idx}">
-              <div class="opt-title">${opt.text}</div>
-              <div class="prob" title="Вероятность ДА">${md.resolved ? ((md.winner_side==='yes')?'ДА ✓':'НЕТ ✓') : (yes_pct+'%')}</div>
-              <div class="actions">
-                ${md.resolved ? `<button class="btn yes" disabled>Закрыт</button>` : `
-                <button class="btn yes buy-btn" data-event="${e.event_uuid}" data-index="${idx}" data-side="yes" data-text="${opt.text}">ДА</button>
-                <button class="btn no  buy-btn" data-event="${e.event_uuid}" data-index="${idx}" data-side="no"  data-text="${opt.text}">НЕТ</button>`}
-              </div>
-              <div class="meta-left">
-                ${ (md.volume||0) >= 1000 ? Math.floor((md.volume||0)/1000)+' тыс. кредитов' : (md.volume||0)+' кредитов' }
-              </div>
-              <div class="meta-right">До ${md.end_short}</div>
-            </div>`;
-        });
-
-        const hist = document.createElement('div');
-        hist.className = 'hist';
-        hist.style.display = 'none';
-        hist.innerHTML = `<div class="muted">Загрузка...</div>`;
-
-        card.appendChild(head);
-        const bodyWrap = document.createElement('div');
-        bodyWrap.innerHTML = body;
-        card.appendChild(bodyWrap);
-        card.appendChild(hist);
-
-        list.appendChild(card);
+    function initOnlyBookmarksButton(btnId){
+      const btn = document.getElementById(btnId);
+      if (!btn) return;
+      const initState = localStorage.getItem(ONLY_BM_KEY) === 'true';
+      btn.setAttribute('aria-pressed', initState ? 'true' : 'false');
+      btn.addEventListener('click', () => {
+        const active = btn.getAttribute('aria-pressed') === 'true';
+        btn.setAttribute('aria-pressed', (!active).toString());
+        localStorage.setItem(ONLY_BM_KEY, (!active).toString());
+        refreshLists();
       });
     }
-    renderEvents(__events);
+    initOnlyBookmarksButton('onlyBookmarksBtn1');
+    initOnlyBookmarksButton('onlyBookmarksBtn2');
+    initOnlyBookmarksButton('onlyBookmarksBtn3');
 
-    // history per event: charts per option
-    function toggleHistory(card, e){
-      const hist = card.querySelector('.hist');
-      if (hist.style.display === 'none'){
-        hist.style.display = 'block';
-        loadHistoryUI(hist, e);
+    // Event chart rendering
+    function renderEventChart(container, payload) {
+      const canvas = container.querySelector('canvas') || (function(){ container.innerHTML='<canvas height="140"></canvas>'; return container.querySelector('canvas'); })();
+      const ctx = canvas.getContext('2d');
+      const datasets = (payload.series || []).map((s, i) => ({
+        label: s.label,
+        data: s.data,
+        borderColor: s.color,
+        backgroundColor: s.color + '33',
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.25,
+        fill: false
+      }));
+      new Chart(ctx, {
+        type: 'line',
+        data: { datasets },
+        options: {
+          parsing: false,
+          animation: { duration: 500, easing: 'easeOutQuart' },
+          interaction: { mode: 'nearest', intersect: false },
+          scales: {
+            x: { type: 'time', time: { tooltipFormat: 'dd.MM HH:mm' } },
+            y: { min: 0, max: 1, ticks: { callback: v => Math.round(v * 100) + '%' } }
+          },
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${(ctx.parsed.y * 100).toFixed(1)}%` } }
+          }
+        }
+      });
+    }
+
+    async function toggleEventChart(cardEl, event_uuid) {
+      cardEl.classList.add('pressed');
+      setTimeout(() => cardEl.classList.remove('pressed'), 120);
+
+      let chartEl = cardEl.querySelector('.event-chart');
+      if (!chartEl) {
+        chartEl = document.createElement('div');
+        chartEl.className = 'event-chart';
+        chartEl.innerHTML = '<canvas height="140"></canvas>';
+        const desc = cardEl.querySelector('.event-description') || cardEl.firstElementChild;
+        (desc ? desc : cardEl).insertAdjacentElement('afterend', chartEl);
+      }
+      if (!chartEl.dataset.loaded) {
+        chartEl.dataset.loaded = '1';
+        const params = new URLSearchParams({ event_uuid, chat_id: chatId, sig });
+        const resp = await fetch('/api/event_prices?' + params.toString());
+        const payload = await resp.json();
+        renderEventChart(chartEl, payload);
+        requestAnimationFrame(() => chartEl.classList.add('visible'));
       } else {
-        hist.style.display = 'none';
+        chartEl.classList.toggle('visible');
       }
     }
-    function loadHistoryUI(container, e){
-      container.innerHTML = '';
-      (e.options||[]).forEach((opt, idx)=>{
-        const block = document.createElement('div');
-        block.style.marginBottom = '12px';
-        block.innerHTML = `
-          <div class="row" style="justify-content:space-between;">
-            <div><b>${opt.text}</b></div>
-            <div class="range" data-idx="${idx}">
-              ${['1Ч','6Ч','1Д','1Н','1М','ВСЕ'].map((t,i)=>`<button class="${i===2?'active':''}" data-range="${['1h','6h','1d','1w','1m','all'][i]}">${t}</button>`).join('')}
-            </div>
+
+    function eventCardHTML(ev){
+      const evu = ev.event_uuid;
+      const title = ev.name || '—';
+      const desc = ev.description || '';
+      const endShort = ev.end_short || '';
+      const bookmarked = isBookmarked(evu) ? 'true' : 'false';
+      const mk = ev.markets || {};
+      const options = (ev.options || []).map((o, idx) => {
+        const txt = (typeof o === 'object' && o && 'text' in o) ? o.text : String(o);
+        const m = mk[idx] || {};
+        const yp = (m.yes_price !== undefined) ? m.yes_price : 0.5;
+        return `
+          <div class="option">
+            <div class="muted" style="font-size:12px">${txt}</div>
+            <div class="price">${(yp*100).toFixed(1)}%</div>
+          </div>`;
+      }).join('');
+      return `
+        <div class="event-card" data-evu="${evu}" onclick="toggleEventChart(this, '${evu}')">
+          <div class="row" style="justify-content:space-between; margin-bottom:6px">
+            <div class="event-title">${title}</div>
+            <button class="icon-btn" aria-pressed="${bookmarked}" title="Закладка" onclick="event.stopPropagation(); toggleBookmark('${evu}')">🔖</button>
           </div>
-          <canvas width="600" height="160" style="width:100%; max-width:100%;"></canvas>`;
-        container.appendChild(block);
-
-        const range = block.querySelector('.range');
-        range.addEventListener('click', (ev)=>{
-          const b = ev.target.closest('button'); if (!b) return;
-          range.querySelectorAll('button').forEach(x=>x.classList.toggle('active', x===b));
-          fetchAndDrawHistory(block.querySelector('canvas'), e.event_uuid, parseInt(range.dataset.idx,10), b.dataset.range);
-        });
-        // default 1Д
-        fetchAndDrawHistory(block.querySelector('canvas'), e.event_uuid, idx, '1d');
-      });
-    }
-    async function fetchAndDrawHistory(canvas, event_uuid, option_index, range){
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0,0,canvas.width,canvas.height);
-      try{
-        const url = `/api/market/history?event_uuid=${encodeURIComponent(event_uuid)}&option_index=${option_index}&range=${range}`;
-        const r = await fetch(url);
-        const data = await r.json();
-        if (!r.ok || !data.success || !data.points || !data.points.length){
-          ctx.fillStyle='#666'; ctx.fillText('Нет данных', 10, 20); return;
-        }
-        drawLineChart(canvas, data.points);
-      }catch(e){
-        ctx.fillStyle='#666'; ctx.fillText('Сетевая ошибка', 10, 20);
-      }
-    }
-    function drawLineChart(canvas, points){
-      const ctx = canvas.getContext('2d');
-      const W = canvas.width, H = canvas.height, P=30;
-      const xs = points.map(p=>new Date(p.ts).getTime());
-      const ys = points.map(p=>p.yes_price);
-      const xmin = Math.min(...xs), xmax = Math.max(...xs);
-      const ymin = Math.min(...ys, 0), ymax = Math.max(...ys, 1);
-      // axes
-      ctx.clearRect(0,0,W,H);
-      ctx.strokeStyle='#eee'; ctx.lineWidth=1;
-      for (let i=0; i<=4; i++){
-        const y = P + (H-2*P)*(i/4);
-        ctx.beginPath(); ctx.moveTo(P, y); ctx.lineTo(W-P, y); ctx.stroke();
-      }
-      // line
-      ctx.strokeStyle = '#1976d2'; ctx.lineWidth=2;
-      ctx.beginPath();
-      points.forEach((p, i)=>{
-        const x = P + (W-2*P)*((new Date(p.ts).getTime()-xmin)/(xmax-xmin || 1));
-        const y = H-P - (H-2*P)*((p.yes_price - ymin)/(ymax - ymin || 1));
-        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-      });
-      ctx.stroke();
-      // dots
-      ctx.fillStyle='#1976d2';
-      points.forEach((p)=>{
-        const x = P + (W-2*P)*((new Date(p.ts).getTime()-xmin)/(xmax-xmin || 1));
-        const y = H-P - (H-2*P)*((p.yes_price - ymin)/(ymax - ymin || 1));
-        ctx.beginPath(); ctx.arc(x,y,2,0,Math.PI*2); ctx.fill();
-      });
-      // labels
-      ctx.fillStyle='#444'; ctx.font='12px system-ui';
-      ctx.fillText('Цена ДА', P, P-10);
-      ctx.fillText('0', 5, H-P);
-      ctx.fillText('1', 5, P);
+          <div class="event-description">${desc}</div>
+          <div class="event-meta"><span class="muted">Дедлайн: ${endShort}</span></div>
+          <div class="options">${options}</div>
+          <!-- chart will appear here -->
+        </div>`;
     }
 
-    // Filters
-    function attachFilters(){
-      const qA = document.getElementById('qActive');
-      const fAB = document.getElementById('fActiveBM');
-      const qR = document.getElementById('qArch');
-      const fRB = document.getElementById('fArchBM');
-      const qE = document.getElementById('qEvents');
-      const fEB = document.getElementById('fEventsBM');
+    async function refreshLists(){
+      // /api/me: позиции, архив
+      const meParams = new URLSearchParams({ chat_id: chatId, sig });
+      const meResp = await fetch('/api/me?' + meParams.toString());
+      const me = await meResp.json();
 
-      function filterActive(){
-        const needle = (qA.value||"").toLowerCase(), onlyBM = fAB.checked;
-        const cards = document.getElementById('active').querySelectorAll('.card');
-        cards.forEach(c=>{
-          const key = c.dataset.key || '';
-          const showBM = !onlyBM || isBM('active', key);
-          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
-          c.style.display = (showBM && showQ) ? '' : 'none';
-        });
-      }
-      function filterArch(){
-        const needle = (qR.value||"").toLowerCase(), onlyBM = fRB.checked;
-        const rows = document.getElementById('arch').querySelectorAll('.card');
-        rows.forEach(c=>{
-          const key = c.dataset.key || '';
-          const showBM = !onlyBM || isBM('arch', key);
-          const showQ  = !needle || c.innerText.toLowerCase().includes(needle);
-          c.style.display = (showBM && showQ) ? '' : 'none';
-        });
-      }
-      function filterEvents(){
-        const needle = (qE.value||"").toLowerCase(), onlyBM = fEB.checked;
-        const cards = document.getElementById('events-list').children;
-        [...cards].forEach(c=>{
-          const key = c.dataset.event || '';
-          const tags = (c.dataset.tags || '').toLowerCase();
-          const showBM = !onlyBM || isBM('events', key);
-          const showQ  = !needle || c.innerText.toLowerCase().includes(needle) || tags.includes(needle);
-          c.style.display = (showBM && showQ) ? '' : 'none';
-        });
-      }
-      if (qA) { qA.addEventListener('input', filterActive); fAB.addEventListener('change', filterActive); }
-      if (qR) { qR.addEventListener('input', filterArch);   fRB.addEventListener('change', filterArch); }
-      if (qE) { qE.addEventListener('input', filterEvents); fEB.addEventListener('change', filterEvents); }
-
-      // initial apply is done after data render
-    }
-
-    // Profile (positions + archive)
-    async function fetchMe(){
-      const cid = getChatId();
-      const activeDiv = document.getElementById("active");
-      const archDiv = document.getElementById("arch");
-      if (!cid){
-        document.getElementById("ubal").textContent = "Баланс: —";
-        document.getElementById("uname").textContent = "Профиль";
-        activeDiv.textContent = "Откройте Mini App из бота (/start).";
-        archDiv.textContent = "—";
-        return;
-      }
-      try{
-        let url = `/api/me?chat_id=${cid}`;
-        if (SIG)  url += `&sig=${SIG}`;
-        if (INIT) url += `&init=${encodeURIComponent(INIT)}`;
-        const r = await fetch(url);
-        const data = await r.json();
-        if (!r.ok || !data.success){ activeDiv.textContent = "Ошибка загрузки."; archDiv.textContent="Ошибка."; return; }
-
-        fillHeader(data.user.login || "", Number(data.user.balance));
-
-        // Active
-        activeDiv.innerHTML = "";
-        const pos = data.positions||[];
-        if (!pos.length){ activeDiv.innerHTML = `<div class="muted">У вас пока нет активных ставок.</div>`; }
-        else{
-          pos.forEach((p, i)=>{
-            const qty = +p.quantity, avg=+p.average_price;
-            const el = document.createElement('div');
-            el.className = 'card';
-            el.dataset.key = (p.event_name||'')+'|'+(p.option_text||'')+'|'+(p.share_type||'');
-            el.innerHTML = `
-              <div class="row" style="justify-content:space-between;">
-                <div>
-                  <div class="row" style="gap:8px">
-                    <div><b>${p.event_name}</b></div>
-                    <button class="bm ${isBM('active',el.dataset.key)?'active':''}" title="Закладка">★</button>
-                  </div>
-                  <div class="muted">${p.option_text}</div>
-                  <div class="muted">Сторона: ${p.share_type.toUpperCase()}</div>
-                  <div>Кол-во: ${qty.toFixed(4)} | Ср. цена: ${avg.toFixed(4)}</div>
-                  <div class="muted">Тек. цена ДА/НЕТ: ${(+p.current_yes_price).toFixed(3)} / ${(+p.current_no_price).toFixed(3)}</div>
-                </div>
-                <div style="text-align:right;">
-                  <div style="font-size:22px;font-weight:900;color:#0b8457">${qty.toFixed(2)} <span class="muted" style="font-size:12px">кред.</span></div>
-                  <div class="muted" style="font-size:12px;">возможная выплата</div>
-                </div>
-              </div>`;
-            el.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('active', el.dataset.key, ev.currentTarget); };
-            activeDiv.appendChild(el);
-          });
+      if (me.success){
+        // positions - простым текстом
+        const posEl = document.getElementById('positions');
+        const pos = me.positions || [];
+        if (!pos.length){ posEl.innerHTML = '<span class="muted">Нет активных позиций</span>'; }
+        else {
+          posEl.innerHTML = pos.map(p => `
+            <div class="row" style="justify-content:space-between; border-bottom:1px dashed #1d2433; padding:6px 2px">
+              <div>${p.event_name} · <span class="muted">${p.option_text}</span></div>
+              <div class="muted">${p.share_type.toUpperCase()} · Qty ${p.quantity}</div>
+            </div>`).join('');
         }
 
-        // Events already rendered (server). Just attach filters after DOM present
-        attachFilters();
-        // Apply initial filter state (none checked)
-        document.getElementById('qActive').dispatchEvent(new Event('input'));
-        document.getElementById('qEvents').dispatchEvent(new Event('input'));
-
-        // Archive
-        archDiv.innerHTML = "";
-        const arr = data.archive||[];
-        if (!arr.length){ archDiv.innerHTML = `<div class="muted">Архив пуст.</div>`; }
-        else{
-          arr.forEach((it, idx)=>{
-            const win = !!it.is_win;
-            const sign = win ? "+" : "−";
-            const amount = Number(it.payout||0).toFixed(2);
-            const when = (it.resolved_at||"").slice(0,16);
-            const el = document.createElement('div');
-            el.className = 'card';
-            el.dataset.key = (it.event_name||'')+'|'+(it.option_text||'')+'|'+(it.winner_side||'');
-            el.style.background = win ? "#eaf7ef" : "#fdecec";
-            el.innerHTML = `
-              <div class="row" style="justify-content:space-between;">
-                <div>
-                  <div class="row" style="gap:8px">
-                    <div><b>${it.event_name || '—'}</b></div>
-                    <button class="bm ${isBM('arch',el.dataset.key)?'active':''}" title="Закладка">★</button>
-                  </div>
-                  <div class="muted">${(it.option_text||'—')} • исход: ${(it.winner_side||'—').toUpperCase()==='YES'?'ДА':(it.winner_side||'—').toUpperCase()==='NO'?'НЕТ':(it.winner_side||'—').toUpperCase()}</div>
-                  <div class="muted">${when}</div>
-                </div>
-                <div style="text-align:right;font-weight:900;${win?'color:#0b8457':'color:#bd1a1a'}">${sign}${amount}</div>
-              </div>`;
-            el.querySelector('.bm').onclick = (ev)=>{ ev.stopPropagation(); toggleBM('arch', el.dataset.key, ev.currentTarget); };
-            archDiv.appendChild(el);
-          });
-          document.getElementById('qArch').addEventListener('input', ()=>{}); // already attached
-          document.getElementById('qArch').dispatchEvent(new Event('input'));
+        // archive
+        const arEl = document.getElementById('archive');
+        const ar = me.archive || [];
+        if (!ar.length){ arEl.innerHTML = '<span class="muted">Пока пусто</span>'; }
+        else {
+          arEl.innerHTML = ar.slice(0, 20).map(r => `
+            <div class="row" style="justify-content:space-between; border-bottom:1px dashed #1d2433; padding:6px 2px">
+              <div>${r.event_name} · <span class="muted">${r.option_text}</span></div>
+              <div class="muted">${r.is_win ? '✅' : '❌'} ${r.payout.toFixed(2)}</div>
+            </div>`).join('');
         }
+      }
 
-      }catch(e){
-        document.getElementById("active").textContent = "Сетевая ошибка.";
-        document.getElementById("arch").textContent = "Сетевая ошибка.";
+      // events server-rendered via Jinja context "events" (passed by Flask)
+      // Но применим фильтр «только закладки»
+      const container = document.getElementById('events');
+      const serverEvents = {{ events|tojson }};
+      const filtered = applyBookmarksFilter(serverEvents);
+      if (!filtered.length){
+        container.innerHTML = '<span class="muted">Ничего не найдено</span>';
+      } else {
+        container.innerHTML = filtered.map(eventCardHTML).join('');
       }
     }
 
-    // Leaders
-    document.getElementById('seg').addEventListener('click', (e)=>{
-      const b = e.target.closest('.seg-btn'); if (!b) return;
-      document.querySelectorAll('#seg .seg-btn').forEach(x=>x.classList.toggle('active', x===b));
-      fetchLeaderboard(b.dataset.period||'week');
-    });
-
-    async function fetchLeaderboard(period='week'){
-      const lb = document.getElementById("lb-container");
-      const rng= document.getElementById("lb-range");
-      try{
-        const r = await fetch("/api/leaderboard?period="+encodeURIComponent(period));
-        const data = await r.json();
-        if (!r.ok || !data.success){ lb.textContent = "Ошибка загрузки рейтинга."; return; }
-        rng.textContent = data.week.label || '';
-        const items = data.items||[];
-        lb.innerHTML = items.length ? "" : "Пока нет данных.";
-        items.slice(0,50).forEach((it,i)=>{
-          const row = document.createElement('div');
-          row.style.display='grid'; row.style.gridTemplateColumns='32px 40px 1fr auto'; row.style.alignItems='center'; row.style.gap='8px'; row.style.padding='6px 0'; row.style.borderBottom='1px solid #eee';
-          row.innerHTML = `
-            <div style="text-align:center;font-weight:800;color:#444;">${i+1}</div>
-            <div style="position:relative;width:32px;height:32px;">
-              <div style="position:absolute;inset:0;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:#fff;background:linear-gradient(135deg,#6a5acd,#00bcd4)">${(it.login||'U').slice(0,2).toUpperCase()}</div>
-            </div>
-            <div style="font-weight:600;color:#111;">${it.login||'—'}</div>
-            <div style="font-weight:900;font-size:16px;color:#0b8457;">${Number(it.earned||0).toFixed(2)}</div>`;
-          lb.appendChild(row);
-        });
-      }catch(e){
-        lb.textContent = "Сетевая ошибка.";
-      }
+    // Leaderboard
+    async function loadLeaderboard(period='week'){
+      const params = new URLSearchParams({ period, chat_id: chatId, sig });
+      const resp = await fetch('/api/leaderboard?' + params.toString());
+      const data = await resp.json();
+      const el = document.getElementById('leaderboard');
+      const rows = (data.rows || data.items || []);
+      if (!rows.length){ el.innerHTML = '<span class="muted">Нет данных</span>'; return; }
+      el.innerHTML = rows.slice(0, 20).map((r, i) => `
+        <div class="row" style="justify-content:space-between; border-bottom:1px dashed #1d2433; padding:6px 2px">
+          <div>#${i+1} ${r.login || r.chat_id}</div>
+          <div class="muted">PnL: ${(r.pnl ?? 0).toFixed(2)}</div>
+        </div>`).join('');
     }
+    document.getElementById('lbWeek').addEventListener('click', () => loadLeaderboard('week'));
+    document.getElementById('lbMonth').addEventListener('click', () => loadLeaderboard('month'));
 
-    // Buying
-    let buyCtx=null;
-    document.addEventListener('click',(ev)=>{
-      const btn = ev.target.closest('.buy-btn'); if(!btn) return;
-      buyCtx = { event_uuid:btn.dataset.event, option_index:parseInt(btn.dataset.index,10), side:btn.dataset.side, chat_id:getChatId(), text:btn.dataset.text };
-      document.getElementById('mTitle').textContent = `Покупка: ${buyCtx.side.toUpperCase()==='YES'?'ДА':buyCtx.side.toUpperCase()==='NO'?'НЕТ':buyCtx.side.toUpperCase()} · ${buyCtx.text}`;
-      document.getElementById('mAmount').value="100";
-      document.getElementById('modalBg').style.display='flex';
-      if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
-    });
-    function closeBuy(){ document.getElementById('modalBg').style.display='none'; buyCtx=null; }
-    async function confirmBuy(){
-      if (!buyCtx) return;
-      const amount = parseFloat(document.getElementById("mAmount").value||"0");
-      if (!(amount>0)){ alert("Введите положительную сумму"); return; }
-      try{
-        const body = { chat_id:+buyCtx.chat_id, event_uuid:buyCtx.event_uuid, option_index:buyCtx.option_index, side:buyCtx.side, amount };
-        if (SIG) body.sig = SIG; if (INIT) body.init = INIT;
-        const r = await fetch("/api/market/buy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-        const data = await r.json();
-        if (!r.ok || !data.success){ alert("Ошибка: "+(data.error||r.statusText)); return; }
-        await fetchMe();
-        closeBuy();
-      }catch(e){ alert("Сетевая ошибка"); }
-    }
-    window.confirmBuy = confirmBuy; window.closeBuy = closeBuy;
-
-    (async function init(){
-      if (tg) tg.ready();
-      await fetchMe();
-    })();
+    // Init
+    refreshLists();
+    loadLeaderboard('week');
   </script>
 </body>
 </html>
@@ -903,20 +554,24 @@ def _format_end_short(end_iso: str) -> str:
 
 # ---------- Rate limiting ----------
 RL_USER_WINDOW = 10
-RL_USER_LIMIT  = 5
-RL_IP_WINDOW   = 60
-RL_IP_LIMIT    = 30
+RL_USER_LIMIT = 5
+RL_IP_WINDOW = 60
+RL_IP_LIMIT = 30
+
 _rl_user = defaultdict(deque)
-_rl_ip   = defaultdict(deque)
+_rl_ip = defaultdict(deque)
+
 
 def _now_ts() -> float:
     return time.time()
+
 
 def _client_ip() -> str:
     xfwd = request.headers.get("X-Forwarded-For", "") or ""
     if xfwd:
         return xfwd.split(",")[0].strip()
     return request.remote_addr or "0.0.0.0"
+
 
 def _check_rate(chat_id: int) -> bool:
     t = _now_ts()
@@ -926,6 +581,7 @@ def _check_rate(chat_id: int) -> bool:
     if len(dq) >= RL_USER_LIMIT:
         return False
     dq.append(t)
+
     ip = _client_ip()
     di = _rl_ip[ip]
     while di and t - di[0] > RL_IP_WINDOW:
@@ -956,6 +612,7 @@ def mini_app():
     for e in events:
         end_iso = str(e.get("end_date", ""))
         e["end_short"] = _format_end_short(end_iso)
+        # рынки + текущая цена
         mk = db.get_markets_for_event(e["event_uuid"])
         markets = {}
         event_total_volume = 0.0
@@ -966,10 +623,9 @@ def mini_app():
             yp = (no / total) if total > 0 else 0.5
             volume = max(0.0, total - 2000.0)
             event_total_volume += volume
-            markets[m["option_index"]] = {
+            markets[int(m["option_index"])] = {
                 "yes_price": yp,
                 "volume": volume,
-                "end_short": e["end_short"],
                 "resolved": bool(m.get("resolved")) if isinstance(m, dict) else False,
                 "winner_side": m.get("winner_side") if isinstance(m, dict) else None,
             }
@@ -990,14 +646,22 @@ def api_me():
     chat_id, err = auth_chat_id_from_request()
     if err:
         return jsonify(success=False, error=err), 403
+
     u = db.get_user(chat_id)
     if not u:
         return jsonify(success=False, error="user_not_found"), 404
     if u.get("status") != "approved":
         return jsonify(success=False, error="not_approved"), 403
+
     positions = db.get_user_positions(chat_id)
     archive = db.get_user_archive(chat_id)
-    return jsonify(success=True, user={"chat_id": chat_id, "balance": float(u.get("balance", 0)), "login": u.get("login")}, positions=positions, archive=archive)
+
+    return jsonify(
+        success=True,
+        user={"chat_id": chat_id, "balance": float(u.get("balance", 0)), "login": u.get("login")},
+        positions=positions,
+        archive=archive,
+    )
 
 
 @app.post("/api/market/buy")
@@ -1021,9 +685,44 @@ def api_market_buy():
     except Exception:
         return jsonify(success=False, error="bad_payload"), 400
 
-    result, err2 = db.trade_buy(
-        chat_id=chat_id, event_uuid=event_uuid, option_index=option_index, side=side, amount=amount
-    )
+    # Получить market_id
+    market_id = db.get_market_id(event_uuid, option_index)
+    if not market_id:
+        return jsonify(success=False, error="market_not_found"), 404
+
+    # Вызов RPC через database (fallback на прямой rpc, если метод отсутствует)
+    try:
+        result = db.trade_buy(chat_id=chat_id, market_id=market_id, side=side, amount=amount)
+        err2 = None
+    except AttributeError:
+        # Прямой вызов RPC
+        try:
+            rr = (
+                db.client.rpc(
+                    "rpc_trade_buy",
+                    {"p_chat_id": chat_id, "p_market_id": market_id, "p_side": side, "p_amount": amount},
+                )
+                .execute()
+                .data
+                or []
+            )
+            if not rr:
+                return jsonify(success=False, error="rpc_failed"), 400
+            row = rr[0]
+            result = {
+                "got_shares": float(row["got_shares"]),
+                "trade_price": float(row["trade_price"]),
+                "new_balance": float(row["new_balance"]),
+                "yes_price": float(row["yes_price"]),
+                "no_price": float(row["no_price"]),
+                "yes_reserve": float(row["yes_reserve"]),
+                "no_reserve": float(row["no_reserve"]),
+            }
+            err2 = None
+        except Exception as e:
+            print("[api_market_buy] rpc error:", e)
+            result, err2 = None, "rpc_error"
+
     if err2:
         return jsonify(success=False, error=err2), 400
 
@@ -1072,31 +771,38 @@ def api_userpic():
         return Response(status=204)
 
 
+# ---------- Leaderboard (fixed) ----------
 @app.get("/api/leaderboard")
 def api_leaderboard():
+    # Не меняем UX: допускаем вызов без initData, по chat_id+sig
+    # Авторизацию мягко проверяем
+    chat_id, err = auth_chat_id_from_request()
+    if err:
+        # Разрешим публичный просмотр (например, из мини‑приложения до фикса подписи),
+        # но отметим в лог:
+        print("[leaderboard] auth warning:", err)
+
     period = (request.args.get("period") or "week").lower()
     if period == "month":
-        bounds = db.month_current_bounds()
-        items = db.get_leaderboard_month(bounds["start"], limit=50)
-        return jsonify(success=True, week=bounds, items=items)
+        start, end = db.month_current_bounds()
     else:
-        bounds = db.week_current_bounds()
-        items = db.get_leaderboard_week(bounds["start"], limit=50)
-        return jsonify(success=True, week=bounds, items=items)
+        start, end = db.week_current_bounds()
+
+    rows = db.leaderboard(start, end, limit=50)
+    return jsonify({"period": period, "start": start, "end": end, "rows": rows})
 
 
-# ---------- Market history (for charts) ----------
+# ---------- Market history (per market, keeps old endpoint) ----------
 @app.get("/api/market/history")
 def api_market_history():
     """
-    Возвращает точки истории цены ДА для конкретного рынка (event_uuid + option_index).
-    Расчёт по market_orders с проигрыванием AMM (x*y=k) от стартовых резервов 1000/1000.
+    История цены ДА для конкретного рынка (event_uuid + option_index),
+    расчёт по market_orders с проигрыванием AMM (x*y=k) от стартовых резервов 1000/1000.
     Параметры: event_uuid, option_index, range: 1h|6h|1d|1w|1m|all
     """
     event_uuid = request.args.get("event_uuid", type=str)
     option_index = request.args.get("option_index", type=int)
     rng = (request.args.get("range") or "1d").lower()
-
     if not event_uuid or option_index is None:
         return jsonify(success=False, error="bad_params"), 400
 
@@ -1112,6 +818,7 @@ def api_market_history():
         ).data
         if not m:
             return jsonify(success=False, error="market_not_found"), 404
+
         market_id = int(m["id"])
         k = float(m.get("constant_product") or 1_000_000.0)
         # стартовые резервы
@@ -1129,25 +836,30 @@ def api_market_history():
             "all": None,
         }
         since = dt_map.get(rng, now - timedelta(days=1))
+
         # 3) забрать приказы
-        q = db.client.table("market_orders").select("order_type, amount, created_at").eq("market_id", market_id).order("created_at", desc=False)
+        q = (
+            db.client.table("market_orders")
+            .select("order_type, amount, created_at")
+            .eq("market_id", market_id)
+            .order("created_at", desc=False)
+        )
         if since:
             q = q.gte("created_at", since.isoformat())
         orders = q.execute().data or []
 
         # 4) проиграть историю
         points = []
-        # стартовая точка: либо создан, либо самая ранняя видимая
+        # стартовая точка
         if since:
-            points.append({
-                "ts": since.isoformat(),
-                "yes_price": n/(y+n) if (y+n)>0 else 0.5
-            })
+            points.append({"ts": since.isoformat(), "yes_price": n / (y + n) if (y + n) > 0 else 0.5})
         else:
-            points.append({
-                "ts": (m.get("created_at") or datetime.now(timezone.utc).isoformat()),
-                "yes_price": n/(y+n) if (y+n)>0 else 0.5
-            })
+            points.append(
+                {
+                    "ts": (m.get("created_at") or datetime.now(timezone.utc).isoformat()),
+                    "yes_price": n / (y + n) if (y + n) > 0 else 0.5,
+                }
+            )
 
         for o in orders:
             side = o["order_type"]
@@ -1158,13 +870,70 @@ def api_market_history():
             else:
                 y = y + amt
                 n = k / y
-            price_yes = n/(y+n) if (y+n)>0 else 0.5
-            points.append({
-                "ts": o["created_at"],
-                "yes_price": price_yes
-            })
+            price_yes = n / (y + n) if (y + n) > 0 else 0.5
+            points.append({"ts": o["created_at"], "yes_price": price_yes})
 
         return jsonify(success=True, points=points)
     except Exception as e:
         print("[api_market_history] error:", e)
         return jsonify(success=False, error="server_error"), 500
+
+
+# ---------- Event-level price history (one chart, many lines) ----------
+@app.get("/api/event_prices")
+def api_event_prices():
+    chat_id, err = auth_chat_id_from_request()
+    if err:
+        # Разрешим без подписи, но лучше настроить chat_id+sig
+        print("[event_prices] auth warning:", err)
+
+    event_uuid = (request.args.get("event_uuid") or "").strip()
+    if not event_uuid:
+        return jsonify({"error": "no_event_uuid"}), 400
+
+    # подписи опций
+    ev = (
+        db.client.table("events")
+        .select("options")
+        .eq("event_uuid", event_uuid)
+        .single()
+        .execute()
+    ).data or {}
+
+    opt_texts = []
+    opts = ev.get("options") or []
+    for o in opts:
+        if isinstance(o, dict):
+            opt_texts.append(o.get("text") or "—")
+        else:
+            opt_texts.append(str(o))
+
+    # RPC по истории (см. созданную функцию rpc_event_price_history)
+    try:
+        rows = (
+            db.client.rpc("rpc_event_price_history", {"p_event_uuid": event_uuid})
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        print("[api_event_prices] rpc error:", e)
+        rows = []
+
+    # группируем по option_index
+    by_idx = {}
+    for r in rows:
+        idx = int(r["option_index"])
+        by_idx.setdefault(idx, []).append({"x": r["created_at"], "y": float(r["yes_price"] or 0)})
+
+    palette = ["#ff6b6b", "#4dabf7", "#51cf66", "#ffd43b", "#845ef7", "#20c997", "#91a7ff", "#fcc419"]
+    series = []
+    for idx, data in by_idx.items():
+        label = opt_texts[idx] if 0 <= idx < len(opt_texts) else f"Вариант {idx+1}"
+        series.append({"option_index": idx, "label": label, "color": palette[idx % len(palette)], "data": data})
+
+    return jsonify({"event_uuid": event_uuid, "series": series})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
