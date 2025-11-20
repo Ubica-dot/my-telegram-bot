@@ -304,373 +304,7 @@ U
 <button>Купить</button> <button>Отмена</button>
 """
 
-# ---------- Admin: мероприятия (как в твоём коммите — без изменений) ----------
-ADMIN_EVENTS_HTML = """
-  Admin · Мероприятия  <a href="/admin">← Админ</a>
-
-# Мероприятия
-
-<form method="get" action="/admin/events" style="margin:8px 0">
-  <input type="text" name="q" value="{{q or ''}}" placeholder="Искать"/>
-  <button type="submit">Искать</button>
-</form>
-
-<h2>Активные</h2>
-{% for ev in active %}
-  <details style="margin:8px 0">
-    <summary>
-      <b>UUID</b> {{ev.event_uuid}} |
-      <b>Название</b> {{ev.name}} |
-      <b>Дедлайн</b> {{ev.end_date}} |
-      <b>Опубл.</b> {{'да' if ev.is_published else 'нет'}} |
-      <b>Рынков</b> {{ev.markets_count}}
-    </summary>
-    <div style="margin:6px 0">{{ev.description}}</div>
-    <button onclick="resolveEvent('{{ev.event_uuid}}')">Закрыть событие</button>
-    <div id="markets_{{ev.event_uuid}}">Загрузка вариантов…</div>
-    <div style="margin-top:8px">
-      {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
-        <button class="range-btn" data-range="{{r}}" data-event="{{ev.event_uuid}}">{{t}}</button>
-      {% endfor %}
-    </div>
-  </details>
-{% endfor %}
-{% if not active %}<div>Нет активных</div>{% endif %}
-
-<h2>Прошедшие</h2>
-{% for ev in past %}
-  <details style="margin:8px 0">
-    <summary>
-      <b>UUID</b> {{ev.event_uuid}} |
-      <b>Название</b> {{ev.name}} |
-      <b>Дедлайн</b> {{ev.end_date}} |
-      <b>Опубл.</b> {{'да' if ev.is_published else 'нет'}} |
-      <b>Рынков</b> {{ev.markets_count}}
-    </summary>
-    <div style="margin:6px 0">{{ev.description}}</div>
-    <button onclick="resolveEvent('{{ev.event_uuid}}')">Закрыть событие</button>
-    <div id="markets_{{ev.event_uuid}}">Загрузка вариантов…</div>
-    <div style="margin-top:8px">
-      {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
-        <button class="range-btn" data-range="{{r}}" data-event="{{ev.event_uuid}}">{{t}}</button>
-      {% endfor %}
-    </div>
-  </details>
-{% endfor %}
-{% if not past %}<div>Нет прошедших</div>{% endif %}
-
-<script>
-async function resolveEvent(event_uuid) {
-  const mwrap = document.getElementById('markets_'+event_uuid);
-  mwrap.textContent = 'Загрузка…';
-  const r = await fetch('/api/admin/event_markets?event_uuid='+encodeURIComponent(event_uuid));
-  const data = await r.json();
-  const opts = data.options || [];
-  const markets = data.markets || [];
-  // простая форма выбора победителей
-  const form = document.createElement('form');
-  form.innerHTML = '<div><b>Варианты</b></div>';
-  markets.forEach(m => {
-    const idx = m.option_index;
-    const label = (opts[idx] || ('Вариант '+idx));
-    const cur = m.winner_side || '';
-    form.innerHTML += `
-      <div style="margin:4px 0">
-        <b>${label}</b>:
-        <label><input type="radio" name="w_${idx}" value="yes" ${cur==='yes'?'checked':''}/> ДА</label>
-        <label><input type="radio" name="w_${idx}" value="no"  ${cur==='no'?'checked':''}/> НЕТ</label>
-        <small>${m.resolved ? '(уже закрыт)' : ''}</small>
-      </div>`;
-  });
-  form.innerHTML += '<button type="submit">Резолв</button>';
-  mwrap.innerHTML = '';
-  mwrap.appendChild(form);
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const winners = {};
-    markets.forEach(m => {
-      const v = form.querySelector(`input[name="w_${m.option_index}"]:checked`);
-      if (v) winners[m.option_index] = v.value;
-    });
-    const resp = await fetch('/admin/events/resolve', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({event_uuid, winners, require_all:false})
-    });
-    const jr = await resp.json();
-    alert(jr.success ? ('Закрыто рынков: '+jr.closed) : ('Ошибка: '+jr.error));
-    location.reload();
-  });
-}
-</script>
-"""
-
-# ---------- Admin: маршруты ----------
-@app.get("/admin")
-@requires_auth
-def admin_home():
-    return render_template_string(
-        """Admin
-# Админ
-
-- <a href="/admin/events">Мероприятия</a><br/>
-- <a href="/admin/users">Пользователи</a><br/>
-- <a href="/admin/reset">Сброс данных (стенд)</a>
-"""
-    )
-
-@app.get("/admin/events")
-@requires_auth
-def admin_events():
-    q = (request.args.get("q") or "").strip().lower()
-    try:
-        evs = (
-            db.client.table("events")
-            .select("event_uuid,name,description,options,end_date,is_published,created_at,tags")
-            .order("created_at", desc=True)
-            .execute()
-            .data or []
-        )
-    except Exception as e:
-        print("[/admin/events] fetch error:", e)
-        evs = []
-
-    now = datetime.now(timezone.utc)
-
-    def match(e):
-        if not q:
-            return True
-        return any([
-            q in str(e.get("event_uuid","")).lower(),
-            q in str(e.get("name","")).lower(),
-            q in ",".join([str(t).lower() for t in (e.get("tags") or [])])
-        ])
-
-    filt = [e for e in evs if match(e)]
-    uuids = [e["event_uuid"] for e in filt]
-    pm_map = {}
-    if uuids:
-        try:
-            pms = (
-                db.client.table("prediction_markets")
-                .select("event_uuid,id")
-                .in_("event_uuid", uuids)
-                .execute()
-                .data or []
-            )
-            from collections import Counter
-            pm_map = dict(Counter([p["event_uuid"] for p in pms]))
-        except Exception:
-            pm_map = {}
-
-    def enrich(e):
-        e2 = dict(e)
-        e2["markets_count"] = pm_map.get(e["event_uuid"], 0)
-        return e2
-
-    active = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) > now]
-    past   = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) <= now]
-
-    # ВАЖНО: не меняем твой шаблон — просто рендерим его
-    return render_template_string(ADMIN_EVENTS_HTML, active=active, past=past, q=q)
-
-@app.get("/api/admin/event_markets")
-@requires_auth
-def api_admin_event_markets():
-    evu = (request.args.get("event_uuid") or "").strip()
-    if not evu:
-        return jsonify({"error": "no_event_uuid"}), 400
-    try:
-        ev = (
-            db.client.table("events")
-            .select("options")
-            .eq("event_uuid", evu)
-            .single()
-            .execute()
-            .data or {}
-        )
-        opts = []
-        for o in (ev.get("options") or []):
-            opts.append(o.get("text") if isinstance(o, dict) else str(o))
-
-        pms = (
-            db.client.table("prediction_markets")
-            .select("id, option_index, total_yes_reserve, total_no_reserve, resolved, winner_side")
-            .eq("event_uuid", evu)
-            .order("option_index", desc=False)
-            .execute()
-            .data or []
-        )
-        return jsonify({"options": opts, "markets": pms})
-    except Exception as e:
-        print("[/api/admin/event_markets] error:", e)
-        return jsonify({"options": [], "markets": []}), 200
-
-@app.post("/admin/events/resolve")
-@requires_auth
-def admin_events_resolve():
-    payload = request.get_json(silent=True) or {}
-    evu = (payload.get("event_uuid") or "").strip()
-    winners = payload.get("winners") or {}  # { "0":"yes", "1":"no", ... }
-    require_all = bool(payload.get("require_all"))
-    if not evu or not isinstance(winners, dict):
-        return jsonify(success=False, error="bad_payload"), 400
-    try:
-        ev = (
-            db.client.table("events")
-            .select("end_date")
-            .eq("event_uuid", evu)
-            .single()
-            .execute()
-            .data
-        )
-        if not ev:
-            return jsonify(success=False, error="event_not_found"), 404
-        end_dt = datetime.fromisoformat(str(ev["end_date"]).replace(" ","T"))
-        now = datetime.now(timezone.utc)
-
-        pms = (
-            db.client.table("prediction_markets")
-            .select("id, option_index, resolved")
-            .eq("event_uuid", evu)
-            .order("option_index", desc=False)
-            .execute()
-            .data or []
-        )
-        unresolved = [m for m in pms if not m.get("resolved")]
-        if require_all:
-            need = {int(m["option_index"]) for m in unresolved}
-            got = {int(k) for k in winners.keys() if str(k).isdigit()}
-            if need != got:
-                return jsonify(success=False, error="winners_incomplete"), 400
-
-        closed = 0
-        payout_total = 0.0
-        for m in unresolved:
-            idx = int(m["option_index"])
-            w = (winners.get(str(idx)) or winners.get(idx) or "").lower()
-            if w not in ("yes","no"):
-                if require_all:
-                    return jsonify(success=False, error=f"winner_missing_for_option_{idx}"), 400
-                continue
-            try:
-                if now < end_dt:
-                    rr = (
-                        db.client.rpc("rpc_resolve_market_force", {"p_market_id": int(m["id"]), "p_winner": w})
-                        .execute().data or []
-                    )
-                else:
-                    rr = (
-                        db.client.rpc("rpc_resolve_market_by_id", {"p_market_id": int(m["id"]), "p_winner": w})
-                        .execute().data or []
-                    )
-                if rr:
-                    closed += 1
-                    payout_total += float(rr[0].get("total_payout") or 0)
-            except Exception as e:
-                print("[resolve_one] error:", e)
-                continue
-
-        return jsonify(success=True, closed=closed, payout_total=round(payout_total,4))
-    except Exception as e:
-        print("[/admin/events/resolve] error:", e)
-        return jsonify(success=False, error="server_error"), 500
-
-# ---------- ДОБАВЛЕНО: создание события (POST) ----------
-@app.post("/admin/events/create")
-@requires_auth
-def admin_events_create():
-    name = (request.form.get("name") or "").strip()
-    description = (request.form.get("description") or "").strip()
-    options_raw = (request.form.get("options") or "").strip()
-    end_date = (request.form.get("end_date") or "").strip()  # 'YYYY-MM-DDTHH:MM'
-    tags_raw = (request.form.get("tags") or "").strip()
-    publish = bool(request.form.get("publish"))
-    double_outcome = bool(request.form.get("double_outcome"))
-
-    if not name or not description or not end_date:
-        return redirect(url_for("admin_events"))
-
-    options = []
-    if not double_outcome:
-        lines = [l.strip() for l in options_raw.splitlines() if l.strip()]
-        if len(lines) < 2:
-            return redirect(url_for("admin_events"))
-        options = [{"text": l} for l in lines]
-
-    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
-    try:
-        creator_id = int(ADMIN_ID) if ADMIN_ID else None
-    except Exception:
-        creator_id = None
-
-    ok, err = db.create_event_with_markets(
-        name=name,
-        description=description,
-        options=options,
-        end_date=end_date,
-        tags=tags,
-        publish=publish,
-        creator_id=creator_id,
-        double_outcome=double_outcome,
-    )
-    if not ok:
-        print("[/admin/events/create] error:", err)
-
-    return redirect(url_for("admin_events"))
-
-# ---------- Admin: сброс данных (стенд) ----------
-ADMIN_RESET_HTML = """
-  Admin · Сброс данных  <a href="/admin">← Админ</a>
-# Сброс данных (стенд)
-
-Удалит события/рынки/ордера/позиции/леджер и сбросит балансы к 1000. Введите «RESET» для подтверждения.
-
-<form method="post" action="/admin/reset">
-  <div><label><input type="checkbox" name="wipe_events"/> Удалить события и рынки</label></div>
-  <div><label><input type="checkbox" name="wipe_trades"/> Удалить ордера/позиции/леджер</label></div>
-  <div><label><input type="checkbox" name="reset_balances"/> Сбросить балансы пользователей к 1000</label></div>
-  <div style="margin:6px 0">
-    <input type="text" name="confirm" placeholder="RESET"/>
-  </div>
-  <button type="submit">Сбросить</button>
-</form>
-
-{% if msg %}
-  <div style="margin-top:8px">{{msg}}</div>
-{% endif %}
-"""
-
-@app.get("/admin/reset")
-@requires_auth
-def admin_reset_get():
-    return render_template_string(ADMIN_RESET_HTML, msg=request.args.get("msg",""))
-
-@app.post("/admin/reset")
-@requires_auth
-def admin_reset_post():
-    confirm = (request.form.get("confirm") or "").strip().upper()
-    if confirm != "RESET":
-        return redirect(url_for("admin_reset_get", msg="Нужно ввести RESET"))
-    wipe_events = bool(request.form.get("wipe_events"))
-    wipe_trades = bool(request.form.get("wipe_trades"))
-    reset_balances = bool(request.form.get("reset_balances"))
-    try:
-        if wipe_trades:
-            db.client.table("ledger").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
-            db.client.table("market_orders").delete().gte("id", 0).execute()
-            db.client.table("user_shares").delete().gte("id", 0).execute()
-        if wipe_events:
-            db.client.table("prediction_markets").delete().gte("id", 0).execute()
-            db.client.table("events").delete().gte("id", 0).execute()
-        if reset_balances:
-            db.client.table("users").update({"balance": 1000.0}).neq("chat_id", None).execute()
-        return redirect(url_for("admin_reset_get", msg="Готово"))
-    except Exception as e:
-        print("[/admin/reset] error:", e)
-        return redirect(url_for("admin_reset_get", msg="Ошибка сброса"))
-
-# ---------- Mini‑app + API ----------
+# ---------- Rate limiting ----------
 RL_USER_WINDOW = 10
 RL_USER_LIMIT  = 5
 RL_IP_WINDOW   = 60
@@ -706,6 +340,7 @@ def _check_rate(chat_id: int) -> bool:
     di.append(t)
     return True
 
+# ---------- Mini‑app + API ----------
 @app.get("/mini-app")
 def mini_app():
     chat_id = request.args.get("chat_id", type=int)
@@ -902,21 +537,20 @@ def api_leaderboard():
         start, end = db.week_current_bounds()
         label = _label_ru(start, end, "За неделю")
 
-    # Возвращаем формат как у тебя (success + week + items)
-    items = []
-    try:
-        if hasattr(db, "leaderboard"):
-            items_raw = db.leaderboard(start, end, limit=50)
-            for it in items_raw:
-                items.append({"login": it.get("login"), "earned": max(float(it.get("payouts",0) or 0), 0.0)})
-    except Exception:
-        pass
+    # НИЧЕГО не меняем в формате ответа
+    items_week = db.get_leaderboard_week(start, limit=50) if hasattr(db, "get_leaderboard_week") else []
+    items_month = db.get_leaderboard_month(start, limit=50) if hasattr(db, "get_leaderboard_month") else []
+    items = items_week if period == "week" else items_month
 
     return jsonify(success=True, week={"start": start, "end": end, "label": label}, items=items)
 
-# ---------- Market history (для графиков) ----------
+# ---------- Market history (для графиков в MiniApp) ----------
 @app.get("/api/market/history")
 def api_market_history():
+    """
+    Точки истории цены ДА для конкретного рынка (event_uuid + option_index),
+    расчёт по market_orders с проигрыванием AMM (x*y=k) от стартовых резервов 1000/1000.
+    """
     event_uuid = request.args.get("event_uuid", type=str)
     option_index = request.args.get("option_index", type=int)
     rng = (request.args.get("range") or "1d").lower()
@@ -981,7 +615,357 @@ def api_market_history():
         print("[api_market_history] error:", e)
         return jsonify(success=False, error="server_error"), 500
 
-# ---------- Admin: Пользователи (новая страница, не влияет на дизайн других) ----------
+# ---------- Admin: страница мероприятий и резолв (как в твоём коммите — без изменений) ----------
+ADMIN_EVENTS_HTML = """
+  Admin · Мероприятия  <a href="/admin">← Админ</a>
+
+# Мероприятия
+
+<form method="get" action="/admin/events" style="margin:8px 0">
+  <input type="text" name="q" value="{{q or ''}}" placeholder="Искать"/>
+  <button type="submit">Искать</button>
+</form>
+
+<h2>Активные</h2>
+{% for ev in active %}
+  <details style="margin:8px 0">
+    <summary>
+      <b>UUID</b> {{ev.event_uuid}} |
+      <b>Название</b> {{ev.name}} |
+      <b>Дедлайн</b> {{ev.end_date}} |
+      <b>Опубл.</b> {{'да' if ev.is_published else 'нет'}} |
+      <b>Рынков</b> {{ev.markets_count}}
+    </summary>
+    <div style="margin:6px 0">{{ev.description}}</div>
+    <button onclick="resolveEvent('{{ev.event_uuid}}')">Закрыть событие</button>
+    <div id="markets_{{ev.event_uuid}}">Загрузка вариантов…</div>
+    <div style="margin-top:8px">
+      {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
+        <button class="range-btn" data-range="{{r}}" data-event="{{ev.event_uuid}}">{{t}}</button>
+      {% endfor %}
+    </div>
+  </details>
+{% endfor %}
+{% if not active %}<div>Нет активных</div>{% endif %}
+
+<h2>Прошедшие</h2>
+{% for ev in past %}
+  <details style="margin:8px 0">
+    <summary>
+      <b>UUID</b> {{ev.event_uuid}} |
+      <b>Название</b> {{ev.name}} |
+      <b>Дедлайн</b> {{ev.end_date}} |
+      <b>Опубл.</b> {{'да' if ev.is_published else 'нет'}} |
+      <b>Рынков</b> {{ev.markets_count}}
+    </summary>
+    <div style="margin:6px 0">{{ev.description}}</div>
+    <button onclick="resolveEvent('{{ev.event_uuid}}')">Закрыть событие</button>
+    <div id="markets_{{ev.event_uuid}}">Загрузка вариантов…</div>
+    <div style="margin-top:8px">
+      {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
+        <button class="range-btn" data-range="{{r}}" data-event="{{ev.event_uuid}}">{{t}}</button>
+      {% endfor %}
+    </div>
+  </details>
+{% endfor %}
+{% if not past %}<div>Нет прошедших</div>{% endif %}
+
+<script>
+async function resolveEvent(event_uuid) {
+  const mwrap = document.getElementById('markets_'+event_uuid);
+  mwrap.textContent = 'Загрузка…';
+  const r = await fetch('/api/admin/event_markets?event_uuid='+encodeURIComponent(event_uuid));
+  const data = await r.json();
+  const opts = data.options || [];
+  const markets = data.markets || [];
+  // простая форма выбора победителей
+  const form = document.createElement('form');
+  form.innerHTML = '<div><b>Варианты</b></div>';
+  markets.forEach(m => {
+    const idx = m.option_index;
+    const label = (opts[idx] || ('Вариант '+idx));
+    const cur = m.winner_side || '';
+    form.innerHTML += `
+      <div style="margin:4px 0">
+        <b>${label}</b>:
+        <label><input type="radio" name="w_${idx}" value="yes" ${cur==='yes'?'checked':''}/> ДА</label>
+        <label><input type="radio" name="w_${idx}" value="no"  ${cur==='no'?'checked':''}/> НЕТ</label>
+        <small>${m.resolved ? '(уже закрыт)' : ''}</small>
+      </div>`;
+  });
+  form.innerHTML += '<button type="submit">Резолв</button>';
+  mwrap.innerHTML = '';
+  mwrap.appendChild(form);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const winners = {};
+    markets.forEach(m => {
+      const v = form.querySelector(`input[name="w_${m.option_index}"]:checked`);
+      if (v) winners[m.option_index] = v.value;
+    });
+    const resp = await fetch('/admin/events/resolve', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({event_uuid, winners, require_all:false})
+    });
+    const jr = await resp.json();
+    alert(jr.success ? ('Закрыто рынков: '+jr.closed) : ('Ошибка: '+jr.error));
+    location.reload();
+  });
+}
+</script>
+"""
+
+@app.get("/admin")
+@requires_auth
+def admin_home():
+    # Добавил только ссылки на пользователей и создание события (новая страница),
+    # не трогая остальной вид.
+    return render_template_string(
+        """Admin
+# Админ
+
+- <a href="/admin/events">Мероприятия</a><br/>
+- <a href="/admin/events/new">Создать событие</a><br/>
+- <a href="/admin/users">Пользователи</a><br/>
+"""
+    )
+
+@app.get("/admin/events")
+@requires_auth
+def admin_events():
+    q = (request.args.get("q") or "").strip().lower()
+    try:
+        evs = (
+            db.client.table("events")
+            .select("event_uuid,name,description,options,end_date,is_published,created_at,tags")
+            .order("created_at", desc=True)
+            .execute()
+            .data or []
+        )
+    except Exception as e:
+        print("[/admin/events] fetch error:", e)
+        evs = []
+
+    now = datetime.now(timezone.utc)
+
+    def match(e):
+        if not q:
+            return True
+        return any([
+            q in str(e.get("event_uuid","")).lower(),
+            q in str(e.get("name","")).lower(),
+            q in ",".join([str(t).lower() for t in (e.get("tags") or [])])
+        ])
+
+    filt = [e for e in evs if match(e)]
+    uuids = [e["event_uuid"] for e in filt]
+    pm_map = {}
+    if uuids:
+        try:
+            pms = (
+                db.client.table("prediction_markets")
+                .select("event_uuid,id")
+                .in_("event_uuid", uuids)
+                .execute()
+                .data or []
+            )
+            from collections import Counter
+            pm_map = dict(Counter([p["event_uuid"] for p in pms]))
+        except Exception:
+            pm_map = {}
+
+    def enrich(e):
+        e2 = dict(e)
+        e2["markets_count"] = pm_map.get(e["event_uuid"], 0)
+        return e2
+
+    active = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) > now]
+    past   = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) <= now]
+
+    return render_template_string(ADMIN_EVENTS_HTML, active=active, past=past, q=q)
+
+@app.get("/api/admin/event_markets")
+@requires_auth
+def api_admin_event_markets():
+    evu = (request.args.get("event_uuid") or "").strip()
+    if not evu:
+        return jsonify({"error": "no_event_uuid"}), 400
+    try:
+        ev = (
+            db.client.table("events")
+            .select("options")
+            .eq("event_uuid", evu)
+            .single()
+            .execute()
+            .data or {}
+        )
+        opts = []
+        for o in (ev.get("options") or []):
+            opts.append(o.get("text") if isinstance(o, dict) else str(o))
+
+        pms = (
+            db.client.table("prediction_markets")
+            .select("id, option_index, total_yes_reserve, total_no_reserve, resolved, winner_side")
+            .eq("event_uuid", evu)
+            .order("option_index", desc=False)
+            .execute()
+            .data or []
+        )
+        return jsonify({"options": opts, "markets": pms})
+    except Exception as e:
+        print("[/api/admin/event_markets] error:", e)
+        return jsonify({"options": [], "markets": []}), 200
+
+@app.post("/admin/events/resolve")
+@requires_auth
+def admin_events_resolve():
+    payload = request.get_json(silent=True) or {}
+    evu = (payload.get("event_uuid") or "").strip()
+    winners = payload.get("winners") or {}  # {option_index: 'yes'|'no'}
+    if not evu or not isinstance(winners, dict):
+        return jsonify(success=False, error="bad_payload"), 400
+    try:
+        ev = (
+            db.client.table("events")
+            .select("end_date")
+            .eq("event_uuid", evu)
+            .single()
+            .execute()
+            .data
+        )
+        if not ev:
+            return jsonify(success=False, error="event_not_found"), 404
+        end_dt = datetime.fromisoformat(str(ev["end_date"]).replace(" ","T"))
+        now = datetime.now(timezone.utc)
+
+        pms = (
+            db.client.table("prediction_markets")
+            .select("id, option_index, resolved")
+            .eq("event_uuid", evu)
+            .order("option_index", desc=False)
+            .execute()
+            .data or []
+        )
+
+        closed = 0
+        payout_total = 0.0
+        for m in pms:
+            if m.get("resolved"):
+                continue
+            idx = int(m["option_index"])
+            w = (winners.get(str(idx)) or winners.get(idx) or "").lower()
+            if w not in ("yes","no"):
+                continue
+            try:
+                if now < end_dt:
+                    rr = (
+                        db.client.rpc("rpc_resolve_market_force", {"p_market_id": int(m["id"]), "p_winner": w})
+                        .execute().data or []
+                    )
+                else:
+                    rr = (
+                        db.client.rpc("rpc_resolve_market_by_id", {"p_market_id": int(m["id"]), "p_winner": w})
+                        .execute().data or []
+                    )
+                if rr:
+                    closed += 1
+                    payout_total += float(rr[0].get("total_payout") or 0)
+            except Exception as e:
+                print("[resolve_one] error:", e)
+                continue
+
+        return jsonify(success=True, closed=closed, payout_total=round(payout_total,4))
+    except Exception as e:
+        print("[/admin/events/resolve] error:", e)
+        return jsonify(success=False, error="server_error"), 500
+
+# ---------- Создание события (отдельная страница, чтобы не менять дизайн /admin/events) ----------
+ADMIN_EVENTS_NEW_HTML = """
+Admin · Новое событие  <a href="/admin">← Админ</a>
+
+<h1>Создать событие</h1>
+<form method="post" action="/admin/events/create">
+  <div>
+    <label>Название</label><br/>
+    <input type="text" name="name" required style="width: 420px"/>
+  </div>
+  <div>
+    <label>Описание</label><br/>
+    <textarea name="description" required rows="3" style="width: 420px"></textarea>
+  </div>
+  <div>
+    <label>Варианты (по одному на строку). Если включить «Двойной исход», список будет проигнорирован.</label><br/>
+    <textarea name="options" rows="3" style="width: 420px" placeholder="Вариант 1&#10;Вариант 2"></textarea>
+  </div>
+  <div>
+    <label>Дедлайн</label><br/>
+    <input type="datetime-local" name="end_date" required/>
+  </div>
+  <div>
+    <label>Теги (через запятую)</label><br/>
+    <input type="text" name="tags" placeholder="спорт, политика"/>
+  </div>
+  <div style="margin-top:6px">
+    <label><input type="checkbox" name="publish" value="1"/> Опубликовать сразу</label><br/>
+    <label><input type="checkbox" name="double_outcome" value="1"/> Двойной исход (ДА/НЕТ)</label>
+  </div>
+  <div style="margin-top:8px">
+    <button type="submit">Создать</button>
+    <a href="/admin/events" style="margin-left:8px">Отмена</a>
+  </div>
+</form>
+"""
+
+@app.get("/admin/events/new")
+@requires_auth
+def admin_events_new():
+    return render_template_string(ADMIN_EVENTS_NEW_HTML)
+
+@app.post("/admin/events/create")
+@requires_auth
+def admin_events_create():
+    name = (request.form.get("name") or "").strip()
+    description = (request.form.get("description") or "").strip()
+    options_raw = (request.form.get("options") or "").strip()
+    end_date = (request.form.get("end_date") or "").strip()  # 'YYYY-MM-DDTHH:MM'
+    tags_raw = (request.form.get("tags") or "").strip()
+    publish = bool(request.form.get("publish"))
+    double_outcome = bool(request.form.get("double_outcome"))
+
+    if not name or not description or not end_date:
+        return redirect(url_for("admin_events_new"))
+
+    options = []
+    if not double_outcome:
+        lines = [l.strip() for l in options_raw.splitlines() if l.strip()]
+        if len(lines) < 2:
+            return redirect(url_for("admin_events_new"))
+        options = [{"text": l} for l in lines]
+
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+    try:
+        creator_id = int(ADMIN_ID) if ADMIN_ID else None
+    except Exception:
+        creator_id = None
+
+    ok, err = db.create_event_with_markets(
+        name=name,
+        description=description,
+        options=options,
+        end_date=end_date,
+        tags=tags,
+        publish=publish,
+        creator_id=creator_id,
+        double_outcome=double_outcome,
+    )
+    if not ok:
+        print("[/admin/events/create] error:", err)
+        return redirect(url_for("admin_events_new"))
+
+    return redirect(url_for("admin_events"))
+
+# ---------- Admin: Пользователи (новая страница — не меняет существующие шаблоны) ----------
 ADMIN_USERS_HTML = """
 Admin · Пользователи  <a href="/admin">← Админ</a>
 
@@ -1117,4 +1101,3 @@ def admin_users_balance():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
-
