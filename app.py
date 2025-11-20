@@ -236,7 +236,7 @@ def telegram_webhook():
                     send_message(chat_id, "Сервис временно недоступен. Повторите позже.")
                     return "ok"
                 web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]]}
+                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]}
                 send_message(chat_id, "Приложение готово.\nОткрывайте:", kb)
             elif status == "pending":
                 send_message(chat_id, "⏳ Ваша заявка на регистрацию ожидает проверки администратором.")
@@ -1117,3 +1117,4 @@ def admin_users_balance():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
