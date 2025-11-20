@@ -3,7 +3,6 @@ import json
 import hmac
 import hashlib
 import time
-import uuid
 from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qsl
 from functools import wraps
@@ -15,7 +14,7 @@ from flask import (
     stream_with_context, redirect, url_for
 )
 
-from database import db  # Supabase client и методы
+from database import db  # Supabase client под капотом
 
 app = Flask(__name__)
 
@@ -160,7 +159,6 @@ def auth_chat_id_from_request():
             return None, "chat_id_mismatch"
         return user_id, None
 
-    # fallback: sig + chat_id
     chat_id = request.args.get("chat_id", type=int)
     sig = request.args.get("sig", "")
     if payload:
@@ -170,7 +168,7 @@ def auth_chat_id_from_request():
         return None, "bad_sig"
     return chat_id, None
 
-# --- helper: короткая дата для /mini-app (фикс 500) ---
+# ---------- helper для /mini-app: короткая дата (фикс 500) ----------
 def _format_end_short(end_iso: str) -> str:
     try:
         dt = datetime.fromisoformat((end_iso or "").replace(" ", "T").split(".")[0])
@@ -271,7 +269,7 @@ def telegram_webhook():
 
     return "ok"
 
-# ---------- Mini App HTML (без изменений дизайна) ----------
+# ---------- Mini App HTML (твоя вёрстка сохранена) ----------
 MINI_APP_HTML = """
 U — мини‑приложение
 
@@ -307,7 +305,7 @@ U
 <button>Купить</button> <button>Отмена</button>
 """
 
-# ---------- Admin: мероприятия (список/резолв) ----------
+# ---------- Admin: мероприятия (список + график + резолв) ----------
 ADMIN_EVENTS_HTML = """
 Admin · Мероприятия  <a href="/admin">← Админ</a>
 
@@ -331,6 +329,11 @@ Admin · Мероприятия  <a href="/admin">← Админ</a>
     <div style="margin:6px 0">{{ev.description}}</div>
     <button onclick="resolveEvent('{{ev.event_uuid}}')">Закрыть событие</button>
     <div id="markets_{{ev.event_uuid}}">Загрузка вариантов…</div>
+    <div style="margin-top:8px">
+      {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
+        <button class="range-btn" data-range="{{r}}" data-event="{{ev.event_uuid}}">{{t}}</button>
+      {% endfor %}
+    </div>
   </details>
 {% endfor %}
 {% if not active %}<div>Нет активных</div>{% endif %}
@@ -348,6 +351,11 @@ Admin · Мероприятия  <a href="/admin">← Админ</a>
     <div style="margin:6px 0">{{ev.description}}</div>
     <button onclick="resolveEvent('{{ev.event_uuid}}')">Закрыть событие</button>
     <div id="markets_{{ev.event_uuid}}">Загрузка вариантов…</div>
+    <div style="margin-top:8px">
+      {% for t,r in [('1Ч','1h'),('6Ч','6h'),('1Д','1d'),('1Н','1w'),('1М','1m'),('ВСЕ','all')] %}
+        <button class="range-btn" data-range="{{r}}" data-event="{{ev.event_uuid}}">{{t}}</button>
+      {% endfor %}
+    </div>
   </details>
 {% endfor %}
 {% if not past %}<div>Нет прошедших</div>{% endif %}
@@ -398,7 +406,7 @@ async function resolveEvent(event_uuid) {
 </script>
 """
 
-# — форма создания события (добавляется сверху, дизайн админки не меняется)
+# --- ДОБАВЛЕННАЯ мини‑форма создания события (рендерится ПЕРЕД ADMIN_EVENTS_HTML, сам шаблон не меняем) ---
 ADMIN_EVENTS_CREATE_FORM = """
 <h2>Создать событие</h2>
 <form method="post" action="/admin/events/create">
@@ -412,7 +420,7 @@ ADMIN_EVENTS_CREATE_FORM = """
   </div>
   <div>
     <label>Варианты (по одному на строку). Если включить «Двойной исход», список будет проигнорирован.</label><br/>
-    <textarea name="options" rows="3" style="width: 420px" placeholder="Вариант 1\nВариант 2"></textarea>
+    <textarea name="options" rows="3" style="width: 420px" placeholder="Вариант 1&#10;Вариант 2"></textarea>
   </div>
   <div>
     <label>Дедлайн</label><br/>
@@ -433,122 +441,19 @@ ADMIN_EVENTS_CREATE_FORM = """
 <hr/>
 """
 
-# ---------- Admin: сброс данных (стенд) ----------
-ADMIN_RESET_HTML = """
-Admin · Сброс данных  <a href="/admin">← Админ</a>
-# Сброс данных (стенд)
-
-Удалит события/рынки/ордера/позиции/леджер и сбросит балансы к 1000. Введите «RESET» для подтверждения.
-
-<form method="post" action="/admin/reset">
-  <div><label><input type="checkbox" name="wipe_events"/> Удалить события и рынки</label></div>
-  <div><label><input type="checkbox" name="wipe_trades"/> Удалить ордера/позиции/леджер</label></div>
-  <div><label><input type="checkbox" name="reset_balances"/> Сбросить балансы пользователей к 1000</label></div>
-  <div style="margin:6px 0">
-    <input type="text" name="confirm" placeholder="RESET"/>
-  </div>
-  <button type="submit">Сбросить</button>
-</form>
-
-{% if msg %}
-  <div style="margin-top:8px">{{msg}}</div>
-{% endif %}
-"""
-
-# ---------- Admin: Users (новая страница) ----------
-ADMIN_USERS_HTML = """
-Admin · Пользователи  <a href="/admin">← Админ</a>
-
-<h1>Пользователи</h1>
-
-<form method="get" action="/admin/users" style="margin:8px 0">
-  <input type="hidden" name="status" value="{{status}}"/>
-  <input type="text" name="q" value="{{q or ''}}" placeholder="chat_id или логин"/>
-  <select name="sort">
-    <option value="">По умолчанию</option>
-    <option value="created_at" {% if sort=='created_at' %}selected{% endif %}>По дате регистрации</option>
-    <option value="balance" {% if sort=='balance' %}selected{% endif %}>По балансу</option>
-  </select>
-  <button type="submit">Искать</button>
-</form>
-
-<div style="margin:8px 0">
-  Статус:
-  {% for s in ['pending','approved','banned'] %}
-    {% if s==status %}<b>{{s}}</b>{% else %}<a href="/admin/users?status={{s}}">{{s}}</a>{% endif %}
-    &nbsp;
-  {% endfor %}
-</div>
-
-<table border="1" cellspacing="0" cellpadding="6">
-  <tr>
-    <th>chat_id</th>
-    <th>логин</th>
-    <th>username</th>
-    <th>статус</th>
-    <th>баланс</th>
-    <th>действия</th>
-  </tr>
-  {% for u in users %}
-    <tr>
-      <td>{{u.chat_id}}</td>
-      <td>{{u.login}}</td>
-      <td>{{u.username or '—'}}</td>
-      <td>{{u.status}}</td>
-      <td>{{'%.2f'|format(u.balance or 0)}}</td>
-      <td>
-        <form method="post" action="/admin/users/action" style="display:inline">
-          <input type="hidden" name="chat_id" value="{{u.chat_id}}"/>
-          {% if status=='pending' %}
-            <button name="action" value="approve">Одобрить</button>
-            <button name="action" value="reject">Отклонить</button>
-          {% elif status=='approved' %}
-            <button name="action" value="ban">Забанить</button>
-          {% elif status=='banned' %}
-            <button name="action" value="unban">Разбанить</button>
-          {% endif %}
-        </form>
-        &nbsp;
-        <details>
-          <summary>Подробнее / баланс</summary>
-          <div style="margin:6px 0">
-            <form method="post" action="/admin/users/balance">
-              <input type="hidden" name="chat_id" value="{{u.chat_id}}"/>
-              <input type="number" name="balance" step="0.01" placeholder="Новый баланс" />
-              <button type="submit">Сохранить</button>
-            </form>
-          </div>
-          <div>
-            <b>Недавние операции</b>
-            <ul>
-              {% for l in (ledger_map.get(u.chat_id) or []) %}
-                <li>{{l.created_at}}: {{l.reason}} ({{l.delta}})</li>
-              {% endfor %}
-              {% if not ledger_map.get(u.chat_id) %}<li>Нет записей</li>{% endif %}
-            </ul>
-          </div>
-        </details>
-      </td>
-    </tr>
-  {% endfor %}
-  {% if not users %}
-    <tr><td colspan="6">Нет пользователей</td></tr>
-  {% endif %}
-</table>
-"""
-
-# ---------- Admin: маршруты ----------
+# ---------- Admin: маршруты мероприятий ----------
 @app.get("/admin")
 @requires_auth
 def admin_home():
-    return render_template_string("""
-Admin
+    return render_template_string(
+        """Admin
 # Админ
 
 - <a href="/admin/events">Мероприятия</a><br/>
 - <a href="/admin/users">Пользователи</a><br/>
 - <a href="/admin/reset">Сброс данных (стенд)</a>
-""")
+"""
+    )
 
 @app.get("/admin/events")
 @requires_auth
@@ -602,52 +507,8 @@ def admin_events():
     active = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) > now]
     past   = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) <= now]
 
+    # ВАЖНО: не меняем твой шаблон — просто добавляем форму сверху
     return render_template_string(ADMIN_EVENTS_CREATE_FORM + ADMIN_EVENTS_HTML, active=active, past=past, q=q)
-
-@app.post("/admin/events/create")
-@requires_auth
-def admin_events_create():
-    name = (request.form.get("name") or "").strip()
-    description = (request.form.get("description") or "").strip()
-    options_raw = (request.form.get("options") or "").strip()
-    end_date = (request.form.get("end_date") or "").strip()  # 'YYYY-MM-DDTHH:MM'
-    tags_raw = (request.form.get("tags") or "").strip()
-    publish = bool(request.form.get("publish"))
-    double_outcome = bool(request.form.get("double_outcome"))
-
-    if not name or not description or not end_date:
-        return redirect(url_for("admin_events"))
-
-    options = []
-    if not double_outcome:
-        if options_raw:
-            lines = [l.strip() for l in options_raw.splitlines() if l.strip()]
-            if len(lines) < 2:
-                return redirect(url_for("admin_events"))
-            options = [{"text": l} for l in lines]
-        else:
-            return redirect(url_for("admin_events"))
-
-    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
-    try:
-        creator_id = int(ADMIN_ID) if ADMIN_ID else None
-    except Exception:
-        creator_id = None
-
-    ok, err = db.create_event_with_markets(
-        name=name,
-        description=description,
-        options=options,
-        end_date=end_date,
-        tags=tags,
-        publish=publish,
-        creator_id=creator_id,
-        double_outcome=double_outcome,
-    )
-    if not ok:
-        print("[/admin/events/create] error:", err)
-
-    return redirect(url_for("admin_events"))
 
 @app.get("/api/admin/event_markets")
 @requires_auth
@@ -751,6 +612,71 @@ def admin_events_resolve():
         print("[/admin/events/resolve] error:", e)
         return jsonify(success=False, error="server_error"), 500
 
+# ---------- ДОБАВЛЕНО: создание события (POST) ----------
+@app.post("/admin/events/create")
+@requires_auth
+def admin_events_create():
+    name = (request.form.get("name") or "").strip()
+    description = (request.form.get("description") or "").strip()
+    options_raw = (request.form.get("options") or "").strip()
+    end_date = (request.form.get("end_date") or "").strip()  # 'YYYY-MM-DDTHH:MM'
+    tags_raw = (request.form.get("tags") or "").strip()
+    publish = bool(request.form.get("publish"))
+    double_outcome = bool(request.form.get("double_outcome"))
+
+    if not name or not description or not end_date:
+        return redirect(url_for("admin_events"))
+
+    options = []
+    if not double_outcome:
+        lines = [l.strip() for l in options_raw.splitlines() if l.strip()]
+        if len(lines) < 2:
+            return redirect(url_for("admin_events"))
+        options = [{"text": l} for l in lines]
+
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+    try:
+        creator_id = int(ADMIN_ID) if ADMIN_ID else None
+    except Exception:
+        creator_id = None
+
+    ok, err = db.create_event_with_markets(
+        name=name,
+        description=description,
+        options=options,
+        end_date=end_date,
+        tags=tags,
+        publish=publish,
+        creator_id=creator_id,
+        double_outcome=double_outcome,
+    )
+    if not ok:
+        print("[/admin/events/create] error:", err)
+
+    return redirect(url_for("admin_events"))
+
+# ---------- Admin: сброс данных (стенд) ----------
+ADMIN_RESET_HTML = """
+Admin · Сброс данных  <a href="/admin">← Админ</a>
+# Сброс данных (стенд)
+
+Удалит события/рынки/ордера/позиции/леджер и сбросит балансы к 1000. Введите «RESET» для подтверждения.
+
+<form method="post" action="/admin/reset">
+  <div><label><input type="checkbox" name="wipe_events"/> Удалить события и рынки</label></div>
+  <div><label><input type="checkbox" name="wipe_trades"/> Удалить ордера/позиции/леджер</label></div>
+  <div><label><input type="checkbox" name="reset_balances"/> Сбросить балансы пользователей к 1000</label></div>
+  <div style="margin:6px 0">
+    <input type="text" name="confirm" placeholder="RESET"/>
+  </div>
+  <button type="submit">Сбросить</button>
+</form>
+
+{% if msg %}
+  <div style="margin-top:8px">{{msg}}</div>
+{% endif %}
+"""
+
 @app.get("/admin/reset")
 @requires_auth
 def admin_reset_get():
@@ -831,6 +757,7 @@ def mini_app():
     user = db.get_user(chat_id)
     if not user or user.get("status") != "approved":
         return Response("""
+
 ### Доступ только для одобренных пользователей
 
 Дождитесь одобрения администратора.
@@ -914,6 +841,7 @@ def api_market_buy():
     except Exception:
         return jsonify(success=False, error="bad_payload"), 400
 
+    # Получить market_id и вызвать RPC
     market_id = db.get_market_id(event_uuid, option_index)
     if not market_id:
         return jsonify(success=False, error="market_not_found"), 404
@@ -1010,10 +938,12 @@ def api_leaderboard():
         start, end = db.week_current_bounds()
         label = _label_ru(start, end, "За неделю")
 
+    # Возвращаем формат как у тебя (success + week + items)
     items = []
     try:
         if hasattr(db, "leaderboard"):
             items_raw = db.leaderboard(start, end, limit=50)
+            # совместим с фронтом: login, earned
             for it in items_raw:
                 items.append({"login": it.get("login"), "earned": max(float(it.get("payouts",0) or 0), 0.0)})
     except Exception:
@@ -1041,6 +971,7 @@ def api_market_history():
         if not m:
             return jsonify(success=False, error="market_not_found"), 404
 
+        market_id = int(m["id"])
         k = float(m.get("constant_product") or 1_000_000.0)
         y = (k ** 0.5)
         n = (k ** 0.5)
@@ -1057,7 +988,7 @@ def api_market_history():
         q = (
             db.client.table("market_orders")
             .select("order_type, amount, created_at")
-            .eq("market_id", int(m["id"]))
+            .eq("market_id", market_id)
             .order("created_at", desc=False)
         )
         if since:
@@ -1087,7 +1018,88 @@ def api_market_history():
         print("[api_market_history] error:", e)
         return jsonify(success=False, error="server_error"), 500
 
-# ---------- Admin: Users маршруты ----------
+# ---------- Admin: Пользователи (новая страница) ----------
+ADMIN_USERS_HTML = """
+Admin · Пользователи  <a href="/admin">← Админ</a>
+
+<h1>Пользователи</h1>
+
+<form method="get" action="/admin/users" style="margin:8px 0">
+  <input type="hidden" name="status" value="{{status}}"/>
+  <input type="text" name="q" value="{{q or ''}}" placeholder="chat_id или логин"/>
+  <select name="sort">
+    <option value="">По умолчанию</option>
+    <option value="created_at" {% if sort=='created_at' %}selected{% endif %}>По дате регистрации</option>
+    <option value="balance" {% if sort=='balance' %}selected{% endif %}>По балансу</option>
+  </select>
+  <button type="submit">Искать</button>
+</form>
+
+<div style="margin:8px 0">
+  Статус:
+  {% for s in ['pending','approved','banned'] %}
+    {% if s==status %}<b>{{s}}</b>{% else %}<a href="/admin/users?status={{s}}">{{s}}</a>{% endif %}
+    &nbsp;
+  {% endfor %}
+</div>
+
+<table border="1" cellspacing="0" cellpadding="6">
+  <tr>
+    <th>chat_id</th>
+    <th>логин</th>
+    <th>username</th>
+    <th>статус</th>
+    <th>баланс</th>
+    <th>действия</th>
+  </tr>
+  {% for u in users %}
+    <tr>
+      <td>{{u.chat_id}}</td>
+      <td>{{u.login}}</td>
+      <td>{{u.username or '—'}}</td>
+      <td>{{u.status}}</td>
+      <td>{{'%.2f'|format(u.balance or 0)}}</td>
+      <td>
+        <form method="post" action="/admin/users/action" style="display:inline">
+          <input type="hidden" name="chat_id" value="{{u.chat_id}}"/>
+          {% if status=='pending' %}
+            <button name="action" value="approve">Одобрить</button>
+            <button name="action" value="reject">Отклонить</button>
+          {% elif status=='approved' %}
+            <button name="action" value="ban">Забанить</button>
+          {% elif status=='banned' %}
+            <button name="action" value="unban">Разбанить</button>
+          {% endif %}
+        </form>
+        &nbsp;
+        <details>
+          <summary>Подробнее / баланс</summary>
+          <div style="margin:6px 0">
+            <form method="post" action="/admin/users/balance">
+              <input type="hidden" name="chat_id" value="{{u.chat_id}}"/>
+              <input type="number" name="balance" step="0.01" placeholder="Новый баланс" />
+              <button type="submit">Сохранить</button>
+            </form>
+          </div>
+          <div>
+            <b>Недавние операции</b>
+            <ul>
+              {% for l in (ledger_map.get(u.chat_id) or []) %}
+                <li>{{l.created_at}}: {{l.reason}} ({{l.delta}})</li>
+              {% endfor %}
+              {% if not ledger_map.get(u.chat_id) %}<li>Нет записей</li>{% endif %}
+            </ul>
+          </div>
+        </details>
+      </td>
+    </tr>
+  {% endfor %}
+  {% if not users %}
+    <tr><td colspan="6">Нет пользователей</td></tr>
+  {% endif %}
+</table>
+"""
+
 @app.get("/admin/users")
 @requires_auth
 def admin_users():
@@ -1114,7 +1126,6 @@ def admin_users_action():
     action = (request.form.get("action") or "").lower()
     if not chat_id or action not in ("approve","reject","ban","unban"):
         return redirect(url_for("admin_users"))
-
     try:
         if action == "approve":
             db.approve_user(chat_id)
@@ -1126,7 +1137,6 @@ def admin_users_action():
             db.unban_user(chat_id)
     except Exception as e:
         print("[/admin/users/action] error:", e)
-
     return redirect(url_for("admin_users", status=request.args.get("status","pending")))
 
 @app.post("/admin/users/balance")
