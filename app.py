@@ -190,7 +190,7 @@ def index():
     return "OK"
 
 LEGAL_HTML = """
-Правила и политика конфиденциальности
+  Правила и политика конфиденциальности
 # Условия использования
 
 Это учебная платформа предсказательных рынков. Нет реальных денег. Котировки волатильны — вы можете потерять игровые кредиты.
@@ -200,7 +200,6 @@ LEGAL_HTML = """
 
 Вопросы — админу бота.
 """
-
 @app.get("/legal")
 def legal():
     return Response(LEGAL_HTML, mimetype="text/html")
@@ -237,7 +236,7 @@ def telegram_webhook():
                     send_message(chat_id, "Сервис временно недоступен. Повторите позже.")
                     return "ok"
                 web_app_url = f"https://{request.host}/mini-app?chat_id={chat_id}&sig={sig}&v={int(time.time())}"
-                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]}
+                kb = {"inline_keyboard": [[{"text": "Открыть Mini App", "web_app": {"url": web_app_url}}]]]}
                 send_message(chat_id, "Приложение готово.\nОткрывайте:", kb)
             elif status == "pending":
                 send_message(chat_id, "⏳ Ваша заявка на регистрацию ожидает проверки администратором.")
@@ -269,9 +268,9 @@ def telegram_webhook():
 
     return "ok"
 
-# ---------- Mini App HTML (твоя вёрстка сохранена) ----------
+# ---------- Mini App HTML (как в твоём коммите — без изменений) ----------
 MINI_APP_HTML = """
-U — мини‑приложение
+  U — мини‑приложение
 
 U
 
@@ -305,9 +304,9 @@ U
 <button>Купить</button> <button>Отмена</button>
 """
 
-# ---------- Admin: мероприятия (список + график + резолв) ----------
+# ---------- Admin: мероприятия (как в твоём коммите — без изменений) ----------
 ADMIN_EVENTS_HTML = """
-Admin · Мероприятия  <a href="/admin">← Админ</a>
+  Admin · Мероприятия  <a href="/admin">← Админ</a>
 
 # Мероприятия
 
@@ -406,42 +405,7 @@ async function resolveEvent(event_uuid) {
 </script>
 """
 
-# --- ДОБАВЛЕННАЯ мини‑форма создания события (рендерится ПЕРЕД ADMIN_EVENTS_HTML, сам шаблон не меняем) ---
-ADMIN_EVENTS_CREATE_FORM = """
-<h2>Создать событие</h2>
-<form method="post" action="/admin/events/create">
-  <div>
-    <label>Название</label><br/>
-    <input type="text" name="name" required style="width: 420px"/>
-  </div>
-  <div>
-    <label>Описание</label><br/>
-    <textarea name="description" required rows="3" style="width: 420px"></textarea>
-  </div>
-  <div>
-    <label>Варианты (по одному на строку). Если включить «Двойной исход», список будет проигнорирован.</label><br/>
-    <textarea name="options" rows="3" style="width: 420px" placeholder="Вариант 1&#10;Вариант 2"></textarea>
-  </div>
-  <div>
-    <label>Дедлайн</label><br/>
-    <input type="datetime-local" name="end_date" required/>
-  </div>
-  <div>
-    <label>Теги (через запятую)</label><br/>
-    <input type="text" name="tags" placeholder="спорт, политика"/>
-  </div>
-  <div style="margin-top:6px">
-    <label><input type="checkbox" name="publish" value="1"/> Опубликовать сразу</label><br/>
-    <label><input type="checkbox" name="double_outcome" value="1"/> Двойной исход (ДА/НЕТ)</label>
-  </div>
-  <div style="margin-top:8px">
-    <button type="submit">Создать</button>
-  </div>
-</form>
-<hr/>
-"""
-
-# ---------- Admin: маршруты мероприятий ----------
+# ---------- Admin: маршруты ----------
 @app.get("/admin")
 @requires_auth
 def admin_home():
@@ -507,8 +471,8 @@ def admin_events():
     active = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) > now]
     past   = [enrich(e) for e in filt if e.get("end_date") and datetime.fromisoformat(str(e["end_date"]).replace(" ","T")) <= now]
 
-    # ВАЖНО: не меняем твой шаблон — просто добавляем форму сверху
-    return render_template_string(ADMIN_EVENTS_CREATE_FORM + ADMIN_EVENTS_HTML, active=active, past=past, q=q)
+    # ВАЖНО: не меняем твой шаблон — просто рендерим его
+    return render_template_string(ADMIN_EVENTS_HTML, active=active, past=past, q=q)
 
 @app.get("/api/admin/event_markets")
 @requires_auth
@@ -657,7 +621,7 @@ def admin_events_create():
 
 # ---------- Admin: сброс данных (стенд) ----------
 ADMIN_RESET_HTML = """
-Admin · Сброс данных  <a href="/admin">← Админ</a>
+  Admin · Сброс данных  <a href="/admin">← Админ</a>
 # Сброс данных (стенд)
 
 Удалит события/рынки/ордера/позиции/леджер и сбросит балансы к 1000. Введите «RESET» для подтверждения.
@@ -943,7 +907,6 @@ def api_leaderboard():
     try:
         if hasattr(db, "leaderboard"):
             items_raw = db.leaderboard(start, end, limit=50)
-            # совместим с фронтом: login, earned
             for it in items_raw:
                 items.append({"login": it.get("login"), "earned": max(float(it.get("payouts",0) or 0), 0.0)})
     except Exception:
@@ -1018,7 +981,7 @@ def api_market_history():
         print("[api_market_history] error:", e)
         return jsonify(success=False, error="server_error"), 500
 
-# ---------- Admin: Пользователи (новая страница) ----------
+# ---------- Admin: Пользователи (новая страница, не влияет на дизайн других) ----------
 ADMIN_USERS_HTML = """
 Admin · Пользователи  <a href="/admin">← Админ</a>
 
